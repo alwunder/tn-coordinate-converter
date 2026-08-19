@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tn-coordinate-converter"
+dynamic = ["version"]
+description = "Convert Carter, geographic, Tennessee State Plane, and UTM coordinates."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Andrew Wunderlich" }]
+keywords = ["Tennessee", "GIS", "coordinates", "Carter", "NAD27", "State Plane", "UTM"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "pyproj>=3.7,<4",
+]
+
+[project.optional-dependencies]
+map = [
+    "pywebview>=6.1,<7; sys_platform == 'win32'",
+    "pythonnet>=3.0,<4; sys_platform == 'win32'",
+    "clr-loader>=0.2,<1; sys_platform == 'win32'",
+]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.9,<1",
+]
+
+[project.scripts]
+tn-coordinate-converter = "tn_coord_converter_gui:main"
+
+[project.gui-scripts]
+tn-coordinate-converter-gui = "tn_coord_converter_gui:main"
+
+[project.urls]
+Homepage = "https://github.com/alwunder/tn-coordinate-converter"
+Issues = "https://github.com/alwunder/tn-coordinate-converter/issues"
+Source = "https://github.com/alwunder/tn-coordinate-converter"
+
+[tool.setuptools]
+py-modules = [
+    "ngmdb_mapview_window",
+    "tn_coord_converter_gui",
+    "tn_coord_converter_module",
+    "tn_coord_converter_version",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "tn_coord_converter_version.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+exclude = ["_old"]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
