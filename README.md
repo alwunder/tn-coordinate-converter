@@ -14,6 +14,8 @@ The project is being prepared as an open-source repository at
 - Batch-convert CSV and JSON files from the desktop interface or command line.
 - Convert Carter coordinates to and from NAD27 without an external lookup
   table.
+- Read complete or partial legacy Carter quadrant calls and represent the most
+  specific supplied subdivision by its center point.
 - Transform geographic and projected coordinates with `pyproj`.
 - Display converted locations in the NGMDB MapView on supported Windows
   systems.
@@ -104,6 +106,35 @@ Latitude:   36.3714736806
 Longitude: -85.5935471530
 ```
 
+Legacy Bulletin 62 quadrant calls are also accepted in place of the four
+footage fields. Enter the calls from the smallest subdivision to the largest,
+as originally printed. Because a quadrant call identifies an area rather than
+an exact well point, the converter uses the center of the most specific
+subdivision supplied:
+
+- One call is the largest quadrant.
+- Two calls are the middle and largest quadrants.
+- Three calls are the smallest, middle, and largest quadrants.
+
+```text
+Section:    11
+Township:   A
+Range:      54E
+Quadrants:  NE NE SE
+```
+
+After a successful single conversion, **Copy X**, **Copy Y**, and **Copy X,Y**
+copy result coordinates to the clipboard. Select **Invert** to change the
+combined button to **Copy Y,X**. Longitude is X and latitude is Y.
+For a Carter target, the copied X/Y pair is the accompanying Tennessee State
+Plane NAD27 coordinate.
+
+Partial Carter coordinates are valid when township and range are known. A
+township/range-only record resolves to the center of its 5-minute quadrangle;
+adding a section resolves to the center of that section. Outputs set
+`carter_complete` to `false` and include `location_method` and `location_note`
+so these approximate centers are not mistaken for precisely located points.
+
 For geographic input, enter longitude and latitude in decimal degrees. For a
 projected source, enter easting/X and northing/Y in the units listed above.
 
@@ -128,13 +159,27 @@ Accepted Carter columns include:
 
 | Value | Accepted columns |
 | --- | --- |
-| Section | `section` |
+| Section (optional) | `section` |
 | Township | `township` |
 | Range | `range` or `range_` |
 | N-S footage | `ns_feet` or `north_south_feet` |
 | N-S line | `fsl_fnl` or `ns_line` |
 | E-W footage | `ew_feet` or `east_west_feet` |
 | E-W line | `fwl_fel` or `ew_line` |
+
+For a legacy Carter record, use `quadrants` (also accepted: `quadrant`,
+`quarter_calls`, or `quarter_quadrants`) instead of all four footage fields.
+Township and range are the minimum fields; section and quadrants may be left
+blank for poorly located records.
+
+```csv
+section,township,range,quadrants
+"",A,54E,""
+11,A,54E,""
+11,A,54E,SE
+11,A,54E,"NE SE"
+11,A,54E,"NE NE SE"
+```
 
 ### Geographic or projected CSV
 
@@ -155,6 +200,10 @@ x,y
 ```
 
 ### JSON
+
+Coordinate pairs in JSON output consistently place the X-like value before the
+Y-like value: `lon` before `lat` for geographic coordinates and `x` before `y`
+for projected coordinates.
 
 JSON input may be a list of records:
 
@@ -276,6 +325,7 @@ not build an end-user installer.
 | `ngmdb_mapview_window.py` | NGMDB MapView integration |
 | `tests/` | Automated conversion and CLI tests |
 | `sample_carter_input.csv` | Example Carter batch input |
+| `sample_carter_quadrant_input.csv` | Example legacy Carter quadrant input |
 | `sample_latlon_input.json` | Example NAD27 batch input |
 
 ## Contributing and security

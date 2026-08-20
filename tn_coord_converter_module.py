@@ -40,9 +40,12 @@ __all__ = [
     "CarterCoordinate",
     "MinuteDimensions",
     "NAD27Coordinate",
+    "carter_area_center_to_nad27",
+    "carter_quadrant_to_nad27",
     "carter_to_nad27",
     "feet_per_minute",
     "nad27_to_carter",
+    "normalize_carter_quadrants",
     "section_southwest_corner",
 ]
 
@@ -61,6 +64,7 @@ _RANGE_1E_WEST_MINUTES = -(89 * 60 + 30)
 
 _TOWNSHIP_RE = re.compile(r"^([1-9]|1[0-9])S$")
 _RANGE_RE = re.compile(r"^([1-9][0-9]*)([EW])$")
+_QUADRANT_RE = re.compile(r"(?:NE|NW|SE|SW)+")
 
 
 # Valid range-block indexes for each Tennessee Carter township.  Range 1E has
@@ -116,8 +120,8 @@ class NAD27Coordinate(NamedTuple):
 
     def as_dict(self) -> Dict[str, float]:
         return {
-            "nad27_lat": self.nad27_lat,
             "nad27_lon": self.nad27_lon,
+            "nad27_lat": self.nad27_lat,
         }
 
 
@@ -148,8 +152,8 @@ class CarterCoordinate(NamedTuple):
             "ew_feet": self.ew_feet,
             "ew_line": self.ew_line,
             "cartercord": self.cartercord,
-            "nad27_lat": self.nad27_lat,
             "nad27_lon": self.nad27_lon,
+            "nad27_lat": self.nad27_lat,
         }
 
 
@@ -211,6 +215,140 @@ def _finite_nonnegative(name: str, value: Any) -> float:
     if parsed < 0.0:
         raise ValueError(f"{name} cannot be negative.")
     return parsed
+
+
+def normalize_carter_quadrants(quadrants: Any) -> Tuple[str, ...]:
+    """Normalize an old-style Carter quadrant call.
+
+    Bulletin 62 writes the calls from the smallest subdivision to the largest,
+    for example ``NE NE SE``. Common separators and compact calls such as
+    ``NE-NE-SE`` and ``NENESE`` are accepted.
+    """
+
+    if isinstance(quadrants, str):
+        compact = re.sub(r"[\s,;./_-]+", "", quadrants.strip().upper())
+        if not compact or _QUADRANT_RE.fullmatch(compact) is None:
+            raise ValueError(
+                "Carter quadrants must contain NE, NW, SE, or SW calls, "
+                "written from smallest to largest (for example: NE NE SE)."
+            )
+        calls = tuple(re.findall(r"NE|NW|SE|SW", compact))
+    else:
+        try:
+            calls = tuple(_normalize_text(value) for value in quadrants)
+        except TypeError as exc:
+            raise ValueError(
+                "Carter quadrants must be text or a sequence of quadrant calls."
+            ) from exc
+        if not calls or any(call not in {"NE", "NW", "SE", "SW"} for call in calls):
+            raise ValueError(
+                "Carter quadrants must contain only NE, NW, SE, or SW calls."
+            )
+
+    if len(calls) > 3:
+        raise ValueError("Legacy Carter quadrant calls contain at most three subdivisions.")
+    return calls
+
+
+def carter_quadrant_to_nad27(
+    section: Any,
+    township: Any,
+    range_: Any,
+    quadrants: Any,
+    *,
+    validate_tennessee_coverage: bool = True,
+) -> NAD27Coordinate:
+    """Convert an old-style Carter quadrant location to NAD27.
+
+    A quadrant call defines an area rather than an exact point. The returned
+    coordinate is the center of the most specific supplied subdivision. Calls
+    are supplied in the Bulletin 62 order, from smallest to largest, and are
+    therefore applied in reverse when locating the subdivision.
+    """
+
+    southwest = section_southwest_corner(
+        section,
+        township,
+        range_,
+        validate_tennessee_coverage=validate_tennessee_coverage,
+    )
+    calls = normalize_carter_quadrants(quadrants)
+
+    west = south = 0.0
+    east = north = 1.0
+    for call in reversed(calls):
+        middle_x = (west + east) / 2.0
+        middle_y = (south + north) / 2.0
+        if call.endswith("E"):
+            west = middle_x
+        else:
+            east = middle_x
+        if call.startswith("N"):
+            south = middle_y
+        else:
+            north = middle_y
+
+    east_fraction = (west + east) / 2.0
+    north_fraction = (south + north) / 2.0
+    return NAD27Coordinate(
+        nad27_lat=southwest.nad27_lat + north_fraction / 60.0,
+        nad27_lon=southwest.nad27_lon + east_fraction / 60.0,
+    )
+
+
+def carter_area_center_to_nad27(
+    township: Any,
+    range_: Any,
+    section: Any = None,
+    quadrants: Any = None,
+    *,
+    validate_tennessee_coverage: bool = True,
+) -> NAD27Coordinate:
+    """Return the center of an incompletely specified Carter area.
+
+    Township/range alone resolves to the center of its five-minute
+    quadrangle. Adding a section resolves to the center of that one-minute
+    section. Adding one to three legacy quadrant calls resolves to the center
+    of the largest, middle, or smallest named subdivision respectively.
+    """
+
+    has_section = section is not None and str(section).strip() != ""
+    has_quadrants = quadrants is not None and str(quadrants).strip() != ""
+    if has_quadrants and not has_section:
+        raise ValueError("A Carter section is required when quadrants are provided.")
+
+    if has_quadrants:
+        return carter_quadrant_to_nad27(
+            section,
+            township,
+            range_,
+            quadrants,
+            validate_tennessee_coverage=validate_tennessee_coverage,
+        )
+
+    if has_section:
+        southwest = section_southwest_corner(
+            section,
+            township,
+            range_,
+            validate_tennessee_coverage=validate_tennessee_coverage,
+        )
+        offset_minutes = 0.5
+    else:
+        # Section 25 occupies the southwest minute of every Carter
+        # quadrangle, so its southwest corner is the quadrangle corner.
+        southwest = section_southwest_corner(
+            25,
+            township,
+            range_,
+            validate_tennessee_coverage=validate_tennessee_coverage,
+        )
+        offset_minutes = 2.5
+
+    return NAD27Coordinate(
+        nad27_lat=southwest.nad27_lat + offset_minutes / 60.0,
+        nad27_lon=southwest.nad27_lon + offset_minutes / 60.0,
+    )
 
 
 def feet_per_minute(latitude: Any) -> MinuteDimensions:

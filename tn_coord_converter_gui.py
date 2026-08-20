@@ -28,11 +28,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tn_coord_converter_module import (
+    carter_area_center_to_nad27 as module_carter_area_center_to_nad27,
+)
+from tn_coord_converter_module import (
     carter_to_nad27 as module_carter_to_nad27,
 )
 from tn_coord_converter_module import (
     nad27_to_carter as module_nad27_to_carter,
 )
+from tn_coord_converter_module import normalize_carter_quadrants
 from tn_coord_converter_version import __version__
 
 try:
@@ -355,21 +359,27 @@ def normalize_range(value: Any) -> str:
 
 
 def make_cartercord(section: Any, township: Any, range_: Any) -> str:
+    if section is None or str(section).strip() == "":
+        return f"{normalize_township(township)}-{normalize_range(range_)}"
     return f"{int(section)}-{normalize_township(township)}-{normalize_range(range_)}"
 
 
 @dataclass
 class CarterResult:
-    section: int
+    section: Optional[int]
     township: str
     range_: str
-    ns_feet: float
-    ns_line: str
-    ew_feet: float
-    ew_line: str
+    ns_feet: Optional[float]
+    ns_line: Optional[str]
+    ew_feet: Optional[float]
+    ew_line: Optional[str]
     cartercord: str
     nad27_lat: float
     nad27_lon: float
+    quadrants: Optional[str] = None
+    carter_complete: bool = True
+    location_method: str = "footage"
+    location_note: Optional[str] = None
 
 
 class CoordinateConverter:
@@ -415,6 +425,98 @@ class CoordinateConverter:
             nad27_lon=coordinate.nad27_lon,
         )
 
+    def carter_quadrant_to_nad27(
+        self,
+        section: Any,
+        township: Any,
+        range_: Any,
+        quadrants: Any,
+    ) -> CarterResult:
+        return self.carter_area_center_to_nad27(
+            township,
+            range_,
+            section=section,
+            quadrants=quadrants,
+        )
+
+    def carter_area_center_to_nad27(
+        self,
+        township: Any,
+        range_: Any,
+        *,
+        section: Any = None,
+        quadrants: Any = None,
+    ) -> CarterResult:
+        has_section = not self._is_blank(section)
+        has_quadrants = not self._is_blank(quadrants)
+        calls = normalize_carter_quadrants(quadrants) if has_quadrants else ()
+        coordinate = module_carter_area_center_to_nad27(
+            township,
+            range_,
+            section=section if has_section else None,
+            quadrants=calls if calls else None,
+        )
+
+        normalized_township = normalize_township(township)
+        normalized_range = normalize_range(range_)
+        section_number = int(str(section).strip()) if has_section else None
+        if not has_section:
+            complete = False
+            location_method = "center_of_township_range"
+            location_note = (
+                "Incomplete Carter coordinate (township/range only); result is the center "
+                "of the 5-minute Carter quadrangle."
+            )
+        elif not calls:
+            complete = False
+            location_method = "center_of_section"
+            location_note = (
+                "Incomplete Carter coordinate (no footage or quadrants); result is the "
+                "center of the section."
+            )
+        elif len(calls) == 1:
+            complete = False
+            location_method = "center_of_largest_quadrant"
+            location_note = (
+                "Incomplete legacy Carter coordinate (largest quadrant only); result is "
+                "the center of that largest quadrant."
+            )
+        elif len(calls) == 2:
+            complete = False
+            location_method = "center_of_middle_quadrant"
+            location_note = (
+                "Incomplete legacy Carter coordinate (middle and largest quadrants only); "
+                "result is the center of the middle quadrant subdivision."
+            )
+        else:
+            complete = True
+            location_method = "center_of_smallest_quadrant"
+            location_note = (
+                "Legacy Carter quadrant coordinate; result is the center of the smallest "
+                "quadrant subdivision."
+            )
+
+        return CarterResult(
+            section=section_number,
+            township=normalized_township,
+            range_=normalized_range,
+            ns_feet=None,
+            ns_line=None,
+            ew_feet=None,
+            ew_line=None,
+            cartercord=make_cartercord(
+                section_number,
+                normalized_township,
+                normalized_range,
+            ),
+            nad27_lat=coordinate.nad27_lat,
+            nad27_lon=coordinate.nad27_lon,
+            quadrants=" ".join(calls) if calls else None,
+            carter_complete=complete,
+            location_method=location_method,
+            location_note=location_note,
+        )
+
     def nad27_to_carter(self, lat27: float, lon27: float) -> CarterResult:
         coordinate = module_nad27_to_carter(lat27, lon27)
 
@@ -429,6 +531,7 @@ class CoordinateConverter:
             cartercord=coordinate.cartercord,
             nad27_lat=coordinate.nad27_lat,
             nad27_lon=coordinate.nad27_lon,
+            location_method="derived_footage",
         )
 
     def project(self, x: float, y: float, source_fmt: str, target_fmt: str) -> Tuple[float, float]:
@@ -458,20 +561,57 @@ class CoordinateConverter:
 
     def _validate_source_payload(self, source_fmt: str, payload: Dict[str, Any]) -> None:
         if source_fmt == "CARTER":
-            required = [
-                ("section", "Section"),
+            required_location = [
                 ("township", "Township"),
                 ("range", "Range"),
-                ("ns_feet", "N-S Distance"),
-                ("ns_line", "From N-S Line"),
-                ("ew_feet", "E-W Distance"),
-                ("ew_line", "From E-W Line"),
             ]
-            missing = [label for key, label in required if self._is_blank(payload.get(key))]
+            missing = [
+                label for key, label in required_location
+                if self._is_blank(payload.get(key))
+            ]
             if missing:
                 raise ValueError(f"Missing required Carter input field(s): {', '.join(missing)}.")
 
-            self._parse_int("Section", payload["section"])
+            has_section = not self._is_blank(payload.get("section"))
+            if has_section:
+                self._parse_int("Section", payload["section"])
+            has_quadrants = not self._is_blank(payload.get("quadrants"))
+            has_any_footage = any(
+                not self._is_blank(payload.get(key))
+                for key in ("ns_feet", "ew_feet")
+            )
+            if has_quadrants:
+                if not has_section:
+                    raise ValueError("A Carter section is required when quadrants are provided.")
+                if has_any_footage:
+                    raise ValueError(
+                        "Enter either legacy Carter quadrants or footage from section lines, not both."
+                    )
+                normalize_carter_quadrants(payload["quadrants"])
+                return
+
+            if not has_any_footage:
+                # Township/range alone and township/range/section are valid
+                # incomplete locations represented by their bounding center.
+                return
+
+            missing_footage = [
+                label
+                for key, label in (
+                    ("section", "Section"),
+                    ("ns_feet", "N-S Distance"),
+                    ("ns_line", "From N-S Line"),
+                    ("ew_feet", "E-W Distance"),
+                    ("ew_line", "From E-W Line"),
+                )
+                if self._is_blank(payload.get(key))
+            ]
+            if missing_footage:
+                raise ValueError(
+                    "Enter legacy Carter quadrants or all footage fields. "
+                    f"Missing footage field(s): {', '.join(missing_footage)}."
+                )
+
             ns_feet = self._parse_float("N-S Distance (ns_feet)", payload["ns_feet"])
             ew_feet = self._parse_float("E-W Distance (ew_feet)", payload["ew_feet"])
             if ns_feet < 0:
@@ -515,14 +655,36 @@ class CoordinateConverter:
         self._validate_source_payload(source_fmt, payload)
 
         if source_fmt == "CARTER":
-            carter = self.carter_to_nad27(
-                payload["section"], payload["township"], payload["range"],
-                payload["ns_feet"], payload["ns_line"], payload["ew_feet"], payload["ew_line"],
-            )
+            if not self._is_blank(payload.get("quadrants")):
+                carter = self.carter_quadrant_to_nad27(
+                    payload["section"],
+                    payload["township"],
+                    payload["range"],
+                    payload["quadrants"],
+                )
+            elif any(
+                not self._is_blank(payload.get(key))
+                for key in ("ns_feet", "ew_feet")
+            ):
+                carter = self.carter_to_nad27(
+                    payload["section"], payload["township"], payload["range"],
+                    payload["ns_feet"], payload["ns_line"], payload["ew_feet"], payload["ew_line"],
+                )
+            else:
+                carter = self.carter_area_center_to_nad27(
+                    payload["township"],
+                    payload["range"],
+                    section=payload.get("section"),
+                )
             if target_fmt == "CARTER":
                 return self._carter_result_to_dict(carter)
             if target_fmt == "GEOGRAPHIC_NAD27":
-                return self._carter_result_to_dict(carter)
+                return self._compose_output(
+                    target_fmt,
+                    carter.nad27_lon,
+                    carter.nad27_lat,
+                    carter,
+                )
             x, y = self.project(carter.nad27_lon, carter.nad27_lat, "GEOGRAPHIC_NAD27", target_fmt)
             return self._compose_output(target_fmt, x, y, carter)
 
@@ -555,22 +717,35 @@ class CoordinateConverter:
         return lon27, lat27
 
     def _carter_result_to_dict(self, carter: CarterResult) -> Dict[str, Any]:
-        return {
-            "section": carter.section,
-            "township": carter.township,
-            "range": carter.range_,
-            "ns_feet": carter.ns_feet,
-            "ns_line": carter.ns_line,
-            "ew_feet": carter.ew_feet,
-            "ew_line": carter.ew_line,
-            "cartercord": carter.cartercord,
-            "nad27_lon": carter.nad27_lon,
-            "nad27_lat": carter.nad27_lat,
-        }
+        result: Dict[str, Any] = {}
+        if carter.section is not None:
+            result["section"] = carter.section
+        result["township"] = carter.township
+        result["range"] = carter.range_
+        if carter.ns_feet is not None:
+            result["ns_feet"] = carter.ns_feet
+            result["ns_line"] = carter.ns_line
+            result["ew_feet"] = carter.ew_feet
+            result["ew_line"] = carter.ew_line
+        result["cartercord"] = carter.cartercord
+        result["nad27_lon"] = carter.nad27_lon
+        result["nad27_lat"] = carter.nad27_lat
+        result["carter_complete"] = carter.carter_complete
+        result["location_method"] = carter.location_method
+        if carter.quadrants is not None:
+            result["quadrants"] = carter.quadrants
+            result["quadrant_order"] = "smallest_to_largest"
+            result["quadrant_count"] = len(carter.quadrants.split())
+            result["quadrant_point"] = carter.location_method
+        if carter.location_note is not None:
+            result["location_note"] = carter.location_note
+        return result
 
     def _compose_output(self, fmt: str, x: float, y: float, carter: Optional[CarterResult]) -> Dict[str, Any]:
         if FORMATS[fmt]["kind"] == "geographic":
-            out = {"lat": y, "lon": x}
+            # JSON preserves insertion order: the x-like longitude always
+            # precedes the y-like latitude, matching projected x/y outputs.
+            out = {"lon": x, "lat": y}
         else:
             out = {"x": x, "y": y}
         out["format"] = fmt
@@ -608,6 +783,10 @@ def parse_record_payload(record: Dict[str, Any], source_fmt: str) -> Dict[str, A
             "ns_line": _first(record, ["fsl_fnl", "ns_line"]),
             "ew_feet": _first(record, ["ew_feet", "east_west_feet"]),
             "ew_line": _first(record, ["fwl_fel", "ew_line"]),
+            "quadrants": _first(
+                record,
+                ["quadrants", "quadrant", "quarter_calls", "quarter_quadrants"],
+            ),
         }
     if FORMATS[source_fmt]["kind"] == "geographic":
         return {
@@ -622,7 +801,7 @@ def parse_record_payload(record: Dict[str, Any], source_fmt: str) -> Dict[str, A
 
 def detect_source_format(record: Dict[str, Any]) -> str:
     keys = {str(k).strip().lower() for k in record.keys()}
-    if {"section", "township", "range"}.issubset(keys) and ({"fsl_fnl", "fwl_fel"}.intersection(keys)):
+    if "township" in keys and ({"range", "range_"} & keys):
         return "CARTER"
     if "y_lat27" in keys or "x_lon27" in keys:
         return "GEOGRAPHIC_NAD27"
@@ -631,6 +810,48 @@ def detect_source_format(record: Dict[str, Any]) -> str:
     if "latitude" in keys and "longitude" in keys:
         return "GEOGRAPHIC_NAD27"
     raise ValueError("Could not auto-detect source format from columns.")
+
+
+def result_coordinate_pair(
+    target_fmt: str,
+    result: Dict[str, Any],
+) -> Tuple[Any, Any]:
+    """Return the result's x-like and y-like values in that order."""
+
+    kind = FORMATS[target_fmt]["kind"]
+    if kind == "geographic":
+        return result["lon"], result["lat"]
+    if kind == "projected":
+        return result["x"], result["y"]
+    if "tnspc_nad27_x" in result and "tnspc_nad27_y" in result:
+        # Carter is not itself an x/y format, so Carter target results use the
+        # Tennessee State Plane NAD27 pair already included in the output.
+        return result["tnspc_nad27_x"], result["tnspc_nad27_y"]
+    raise ValueError("Converted result did not include a copyable coordinate pair.")
+
+
+def format_coordinate_for_clipboard(value: Any) -> str:
+    """Format one coordinate without adding labels or locale separators."""
+
+    if isinstance(value, float):
+        return repr(value)
+    return str(value)
+
+
+def format_coordinate_pair_for_clipboard(
+    x: Any,
+    y: Any,
+    order: str = "xy",
+) -> str:
+    """Format a comma-separated pair in x,y or y,x order."""
+
+    if order not in {"xy", "yx"}:
+        raise ValueError("Coordinate copy order must be 'xy' or 'yx'.")
+    first, second = (x, y) if order == "xy" else (y, x)
+    return (
+        f"{format_coordinate_for_clipboard(first)},"
+        f"{format_coordinate_for_clipboard(second)}"
+    )
 
 
 def read_records(path: Path) -> List[Dict[str, Any]]:
@@ -723,8 +944,8 @@ class App:
         self.batch_target_var = tk.StringVar(value=FORMATS["GEOGRAPHIC_NAD27"]["label"])
         self.input_path_var = tk.StringVar()
         self.output_path_var = tk.StringVar()
-        self.map_coords_var = tk.StringVar(value="No converted point selected.")
-        self.map_status_var = tk.StringVar(value='Convert a point, then click "View on map".')
+        self.active_copy_xy: Optional[Tuple[Any, Any]] = None
+        self.invert_copy_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self._update_single_mode()
@@ -777,9 +998,14 @@ class App:
             "ns_line": tk.StringVar(value="FSL"),
             "ew_feet": tk.StringVar(),
             "ew_line": tk.StringVar(value="FWL"),
+            "quadrants": tk.StringVar(),
         }
 
-        carter_top_fields = [("Section", "section"), ("Township", "township"), ("Range", "range")]
+        carter_top_fields = [
+            ("Section (optional)", "section"),
+            ("Township", "township"),
+            ("Range", "range"),
+        ]
         for idx, (label, key) in enumerate(carter_top_fields):
             ttk.Label(self.carter_frame, text=label).grid(row=0, column=idx * 2, sticky="w", padx=6, pady=6)
             ttk.Entry(self.carter_frame, textvariable=self.carter_vars[key], width=18).grid(
@@ -811,6 +1037,28 @@ class App:
                     row=row, column=col + 1, sticky="ew", padx=6, pady=6
                 )
 
+        quadrant_frame = ttk.LabelFrame(
+            self.carter_frame,
+            text="Legacy Quadrant Location (use instead of footage)",
+        )
+        quadrant_frame.grid(row=2, column=0, columnspan=6, sticky="ew", padx=6, pady=6)
+        quadrant_frame.columnconfigure(1, weight=1)
+        ttk.Label(quadrant_frame, text="Quadrants").grid(
+            row=0, column=0, sticky="w", padx=6, pady=6
+        )
+        ttk.Entry(
+            quadrant_frame,
+            textvariable=self.carter_vars["quadrants"],
+            width=30,
+        ).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        ttk.Label(
+            quadrant_frame,
+            text=(
+                "Calls are smallest to largest: 1 = largest; 2 = middle, largest; "
+                "3 = smallest, middle, largest. The resolved area center is used."
+            ),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+
         self.xy_frame = ttk.LabelFrame(self.single_inputs_frame, text="Coordinate Inputs")
         self.xy_frame.grid(row=0, column=0, sticky="ew")
         self.xy_x_label = ttk.Label(self.xy_frame, text="Longitude / X")
@@ -830,15 +1078,37 @@ class App:
         ttk.Button(button_row, text="Clear", command=self.clear_single).pack(side="left", padx=(8, 0))
         self.view_on_map_button = ttk.Button(button_row, text="View on map", command=self.view_on_map, state="disabled")
         self.view_on_map_button.pack(side="left", padx=(8, 0))
-        self.toggle_map_panel_button = ttk.Button(button_row, text="Show Map Panel", command=self.toggle_map_panel)
-        self.toggle_map_panel_button.pack(side="right")
 
-        self.map_panel = ttk.LabelFrame(parent, text="Map View")
-        ttk.Label(self.map_panel, textvariable=self.map_coords_var).pack(anchor="w", padx=8, pady=(8, 4))
-        ttk.Label(self.map_panel, textvariable=self.map_status_var, wraplength=760, justify="left").pack(
-            anchor="w", fill="x", padx=8, pady=(0, 8)
+        copy_row = ttk.Frame(button_row)
+        copy_row.pack(side="right")
+        self.copy_x_button = ttk.Button(
+            copy_row,
+            text="Copy X",
+            command=lambda: self.copy_coordinate("x"),
+            state="disabled",
         )
-        self.map_panel_visible = False
+        self.copy_x_button.pack(side="left")
+        self.copy_y_button = ttk.Button(
+            copy_row,
+            text="Copy Y",
+            command=lambda: self.copy_coordinate("y"),
+            state="disabled",
+        )
+        self.copy_y_button.pack(side="left", padx=(6, 0))
+        self.copy_pair_button = ttk.Button(
+            copy_row,
+            text="Copy X,Y",
+            command=lambda: self.copy_coordinate("pair"),
+            state="disabled",
+        )
+        self.copy_pair_button.pack(side="left", padx=(6, 0))
+        self.invert_copy_checkbox = ttk.Checkbutton(
+            copy_row,
+            text="Invert",
+            variable=self.invert_copy_var,
+            command=self.update_copy_pair_label,
+        )
+        self.invert_copy_checkbox.pack(side="left", padx=(6, 0))
 
         self.single_output = tk.Text(parent, height=20, wrap="word")
         self.single_output.pack(fill="both", expand=True, padx=8, pady=8)
@@ -864,7 +1134,8 @@ class App:
         settings.columnconfigure(1, weight=1)
 
         help_text = (
-            "Supported Carter-style input columns: section, township, range, ns_feet, fsl_fnl, ew_feet, fwl_fel\n"
+            "Carter input requires township and range. Section, legacy quadrants, and footage are "
+            "optional refinements; incomplete areas resolve to their center.\n"
             "Supported geographic-style input columns: lat/lon, latitude/longitude, or y_lat27/x_lon27.\n"
             "For projected coordinates, use generic x and y columns and choose the source format explicitly."
         )
@@ -1037,7 +1308,21 @@ class App:
     ) -> Dict[str, Any]:
         display_outputs = dict(output_values)
         if source_fmt == "CARTER":
-            carter_input_keys = {"section", "township", "range", "ns_feet", "ns_line", "ew_feet", "ew_line", "cartercord"}
+            carter_input_keys = {
+                "section",
+                "township",
+                "range",
+                "ns_feet",
+                "ns_line",
+                "ew_feet",
+                "ew_line",
+                "cartercord",
+                "quadrants",
+                "quadrant_order",
+                "quadrant_point",
+                "nad27_lon",
+                "nad27_lat",
+            }
             display_outputs = {k: v for k, v in display_outputs.items() if k not in carter_input_keys}
 
         source_meta: Dict[str, Any] = {
@@ -1067,22 +1352,50 @@ class App:
             },
         }
 
-    def toggle_map_panel(self) -> None:
-        if self.map_panel_visible:
-            self.map_panel.pack_forget()
-            self.toggle_map_panel_button.configure(text="Show Map Panel")
-            self.map_panel_visible = False
-            return
-
-        self.map_panel.pack(fill="x", padx=8, pady=(0, 8), before=self.single_output)
-        self.toggle_map_panel_button.configure(text="Hide Map Panel")
-        self.map_panel_visible = True
-
-    def _clear_active_map_point(self, *, message: str) -> None:
+    def _clear_active_map_point(self) -> None:
         self.active_map_lon_lat = None
         self.view_on_map_button.configure(state="disabled")
-        self.map_coords_var.set("No converted point selected.")
-        self.map_status_var.set(message)
+
+    def _clear_active_copy_pair(self) -> None:
+        self.active_copy_xy = None
+        self.copy_x_button.configure(state="disabled")
+        self.copy_y_button.configure(state="disabled")
+        self.copy_pair_button.configure(state="disabled")
+
+    def _update_copy_pair_from_result(
+        self,
+        target_fmt: str,
+        result: Dict[str, Any],
+    ) -> None:
+        try:
+            self.active_copy_xy = result_coordinate_pair(target_fmt, result)
+        except (KeyError, ValueError):
+            self._clear_active_copy_pair()
+            return
+        self.copy_x_button.configure(state="normal")
+        self.copy_y_button.configure(state="normal")
+        self.copy_pair_button.configure(state="normal")
+
+    def update_copy_pair_label(self) -> None:
+        label = "Y,X" if self.invert_copy_var.get() else "X,Y"
+        self.copy_pair_button.configure(text=f"Copy {label}")
+
+    def copy_coordinate(self, component: str) -> None:
+        if self.active_copy_xy is None:
+            return
+        x, y = self.active_copy_xy
+        if component == "x":
+            text = format_coordinate_for_clipboard(x)
+        elif component == "y":
+            text = format_coordinate_for_clipboard(y)
+        elif component == "pair":
+            order = "yx" if self.invert_copy_var.get() else "xy"
+            text = format_coordinate_pair_for_clipboard(x, y, order)
+        else:
+            raise ValueError(f"Unsupported coordinate component: {component}")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update_idletasks()
 
     def _result_to_wgs84_lon_lat(self, target_fmt: str, result: Dict[str, Any]) -> Tuple[float, float]:
         if "lon" in result and "lat" in result:
@@ -1107,17 +1420,15 @@ class App:
         try:
             lon, lat = self._result_to_wgs84_lon_lat(target_fmt, result)
         except Exception:
-            self._clear_active_map_point(message="Converted result does not include a usable map point.")
+            self._clear_active_map_point()
             return
 
         if not (-180 <= lon <= 180 and -90 <= lat <= 90):
-            self._clear_active_map_point(message="Converted map point was out of longitude/latitude bounds.")
+            self._clear_active_map_point()
             return
 
         self.active_map_lon_lat = (lon, lat)
         self.view_on_map_button.configure(state="normal")
-        self.map_coords_var.set(f"WGS84: lon={lon:.6f}, lat={lat:.6f}")
-        self.map_status_var.set('Ready. Click "View on map" to center NGMDB MapView.')
 
     def view_on_map(self) -> None:
         if self.active_map_lon_lat is None:
@@ -1126,24 +1437,10 @@ class App:
 
         lon, lat = self.active_map_lon_lat
         try:
-            state = self.map_view.open_or_update(lon, lat)
+            self.map_view.open_or_update(lon, lat)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc))
-            self.map_status_var.set(f"Map launch failed: {exc}")
             return
-
-        if state == "started":
-            self.map_status_var.set(
-                f"Map window opened and centered to lon={lon:.6f}, lat={lat:.6f}."
-            )
-        elif state == "updated":
-            self.map_status_var.set(
-                f"Map window updated to lon={lon:.6f}, lat={lat:.6f}."
-            )
-        else:
-            self.map_status_var.set(
-                "Tried to start MapView. If no window opened, verify pywebview and Edge WebView2 runtime are installed."
-            )
 
     def clear_single(self) -> None:
         for var in self.carter_vars.values():
@@ -1153,8 +1450,11 @@ class App:
         self.carter_vars["ew_line"].set("FWL")
         self.xy_x_var.set("")
         self.xy_y_var.set("")
+        self.invert_copy_var.set(False)
+        self.update_copy_pair_label()
         self.single_output.delete("1.0", "end")
-        self._clear_active_map_point(message='Convert a point, then click "View on map".')
+        self._clear_active_map_point()
+        self._clear_active_copy_pair()
 
     def convert_single(self) -> None:
         try:
@@ -1168,15 +1468,22 @@ class App:
                 raise ValueError("Source and target formats are the same. Choose different formats to convert.")
 
             if source_fmt == "CARTER":
-                payload = {
+                common_carter_payload = {
                     "section": self.carter_vars["section"].get(),
                     "township": self.carter_vars["township"].get(),
                     "range": self.carter_vars["range"].get(),
-                    "ns_feet": self.carter_vars["ns_feet"].get(),
-                    "ns_line": self.carter_vars["ns_line"].get(),
-                    "ew_feet": self.carter_vars["ew_feet"].get(),
-                    "ew_line": self.carter_vars["ew_line"].get(),
                 }
+                quadrants = self.carter_vars["quadrants"].get()
+                if quadrants.strip():
+                    payload = {**common_carter_payload, "quadrants": quadrants}
+                else:
+                    payload = {
+                        **common_carter_payload,
+                        "ns_feet": self.carter_vars["ns_feet"].get(),
+                        "ns_line": self.carter_vars["ns_line"].get(),
+                        "ew_feet": self.carter_vars["ew_feet"].get(),
+                        "ew_line": self.carter_vars["ew_line"].get(),
+                    }
             elif FORMATS[source_fmt]["kind"] == "geographic":
                 payload = {"lon": self.xy_x_var.get(), "lat": self.xy_y_var.get()}
             else:
@@ -1186,9 +1493,11 @@ class App:
             display = self._single_output_payload(source_fmt, target_fmt, payload, result)
             self.single_output.delete("1.0", "end")
             self.single_output.insert("1.0", json.dumps(display, indent=2))
+            self._update_copy_pair_from_result(target_fmt, result)
             self._update_map_point_from_result(target_fmt, result)
         except Exception as exc:
-            self._clear_active_map_point(message='Convert a point, then click "View on map".')
+            self._clear_active_map_point()
+            self._clear_active_copy_pair()
             messagebox.showerror(APP_TITLE, str(exc))
 
     def on_close(self) -> None:
