@@ -1,9 +1,9 @@
 # Tennessee Coordinate Converter
 
 Tennessee Coordinate Converter is a desktop and command-line application for
-converting between coordinate systems commonly used in Tennessee. Carter
-coordinates are one supported format alongside geographic, Tennessee State
-Plane, and UTM coordinates.
+converting between coordinate systems commonly used in Tennessee. Geographic (Lat/Lon), Tennessee State
+Plane, and UTM coordinates in common datums are supported. Additionally, the arcane Carter
+coordinate system used in Tennessee historically for locating wells is also supported. 
 
 The project is being prepared as an open-source repository at
 [alwunder/tn-coordinate-converter](https://github.com/alwunder/tn-coordinate-converter).
@@ -26,7 +26,7 @@ The project is being prepared as an open-source repository at
 
 | Format | Command-line name | Units |
 | --- | --- | --- |
-| Carter Coordinates | `CARTER` | U.S. survey feet from section lines |
+| Carter Coordinates | `CARTER` | Grid/section notation; U.S. survey feet for footage offsets |
 | Latitude/Longitude (NAD27) | `GEOGRAPHIC_NAD27` | Decimal degrees |
 | Latitude/Longitude (NAD83) | `GEOGRAPHIC_NAD83` | Decimal degrees |
 | Latitude/Longitude (WGS84) | `GEOGRAPHIC_WGS84` | Decimal degrees |
@@ -37,15 +37,62 @@ The project is being prepared as an open-source repository at
 | UTM Zone 16N, NAD27/NAD83 | `UTM16_NAD27`, `UTM16_NAD83` | Meters |
 | UTM Zone 17N, NAD27/NAD83 | `UTM17_NAD27`, `UTM17_NAD83` | Meters |
 
+### Carter coordinates
+
+The Carter Coordinate System adapts the township-and-range concept to a grid
+of 5-minute latitude/longitude quadrangles. The Tennessee and Kentucky grid
+uses 89 degrees 30 minutes west longitude and 36 degrees 30 minutes north
+latitude as its origin. South of the origin, townships are numbered `1S`,
+`2S`, and so on; north of it they are lettered `A`, `B`, `C`, and so on.
+Tennessee ranges are numbered east or west of the origin as `1E`, `2E`, or
+`1W`, `2W`, for example.
+
+Each quadrangle contains twenty-five 1-minute sections in a 5-by-5 grid. The
+sections follow a back-and-forth pattern: section 1 is in the northeast,
+section 5 is in the northwest, and numbering continues by alternating
+direction until section 25 in the southwest.
+
+![Bulletin 62 Carter grid and legacy quadrant notation](explanation/CarterCoords_Bull62_sm.png)
+
+*Bulletin 62 illustration: the 25-section grid and a legacy location written
+as `NE NE SE Sec. 11, A-54E`.*
+
+Carter records use either of two location conventions within a section:
+
+- **Footage notation** gives the north-south distance first from `FNL` or
+  `FSL`, followed by the east-west distance from `FEL` or `FWL`. For example,
+  `2400 FSL, 1800 FEL, Sec. 11, 7S-39E` describes a point measured from the
+  south and east section lines.
+- **Legacy quadrant notation** recursively quarters the section. Calls are
+  written from the smallest supplied subdivision to the largest, so
+  `NE NE SE` means the northeast quarter of the northeast quarter of the
+  southeast quarter. To locate it spatially, read the calls in reverse:
+  `SE`, then `NE`, then `NE`.
+
+![Bulletin 76 Carter grid and footage notation](explanation/CarterCoords_Bull76_sm.png)
+
+*Bulletin 76 illustration: Carter grids within a 7.5-minute topographic quadrangle and
+the footage-from-section-lines convention.*
+
+The converter also accepts incomplete Carter locations. Township/range alone
+resolves to the center of the 5-minute quadrangle; adding a section resolves
+to the section center. One, two, or three legacy calls resolve to the center
+of the largest, middle, or smallest supplied subdivision, respectively.
+Approximate results are identified by `carter_complete`, `location_method`,
+and `location_note` in the output.
+
+Historical source material is available in the
+[Carter explanation document](<explanation/Explanation of Carter Coordinate System.docx>)
+and its [plain-text transcription](explanation/CarterCoordExpText.txt).
+
 ## Requirements
 
 - Python 3.10 or newer
-- Python 3.12 is selected for the reproducible deployment lock and plan
-- Tkinter for the desktop interface (included with standard Windows Python
-  installations)
 - `pyproj` for geographic and projected transformations
-- On Windows, `pywebview`, Python.NET, and the Microsoft Edge WebView2 Runtime
-  for the optional NGMDB map window
+- Tkinter for the desktop interface; it is included with standard Windows
+  Python installations
+- For the optional NGMDB MapView on Windows: `pywebview`, Python.NET, and the
+  Microsoft Edge WebView2 Runtime
 
 Coordinate conversion works without internet access. The NGMDB map requires
 access to `https://ngmdb.usgs.gov`.
@@ -298,22 +345,7 @@ python -m ruff check .
 ```
 
 The repository intentionally excludes generated executables, build output,
-IDE settings, caches, and historical source material.
-
-## Deployment planning
-
-The intended deployment workflow is
-[alwunder/python-deployment-builder](https://github.com/alwunder/python-deployment-builder):
-
-```powershell
-pdbuilder assess .
-pdbuilder plan . --online
-```
-
-As of August 19, 2026, Python Deployment Builder supports assessment and
-planning. Its generation and runtime-validation milestones are not yet
-implemented, so these commands prepare deployment evidence and policy but do
-not build an end-user installer.
+IDE settings, and caches.
 
 ## Project layout
 
@@ -323,6 +355,7 @@ not build an end-user installer.
 | `tn_coord_converter_module.py` | Standalone Carter/NAD27 calculations |
 | `tn_coord_converter_version.py` | Release and product metadata |
 | `ngmdb_mapview_window.py` | NGMDB MapView integration |
+| `explanation/` | Historical Carter explanation text and illustrations |
 | `tests/` | Automated conversion and CLI tests |
 | `sample_carter_input.csv` | Example Carter batch input |
 | `sample_carter_quadrant_input.csv` | Example legacy Carter quadrant input |
