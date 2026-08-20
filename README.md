@@ -52,26 +52,27 @@ sections follow a back-and-forth pattern: section 1 is in the northeast,
 section 5 is in the northwest, and numbering continues by alternating
 direction until section 25 in the southwest.
 
-![Bulletin 62 Carter grid and legacy quadrant notation](explanation/CarterCoords_Bull62_sm.png)
-
-*Bulletin 62 illustration: the 25-section grid and a legacy location written
-as `NE NE SE Sec. 11, A-54E`.*
-
 Carter records use either of two location conventions within a section:
 
-- **Footage notation** gives the north-south distance first from `FNL` or
-  `FSL`, followed by the east-west distance from `FEL` or `FWL`. For example,
-  `2400 FSL, 1800 FEL, Sec. 11, 7S-39E` describes a point measured from the
-  south and east section lines.
 - **Legacy quadrant notation** recursively quarters the section. Calls are
   written from the smallest supplied subdivision to the largest, so
   `NE NE SE` means the northeast quarter of the northeast quarter of the
   southeast quarter. To locate it spatially, read the calls in reverse:
   `SE`, then `NE`, then `NE`.
 
-![Bulletin 76 Carter grid and footage notation](explanation/CarterCoords_Bull76_sm.png)
+    ![Bulletin 62 Carter grid and legacy quadrant notation](explanation/CarterCoords_Bull62_sm.png)
 
-*Bulletin 76 illustration: Carter grids within a 7.5-minute topographic quadrangle and
+    *Bulletin 62 illustration: the 25-section grid and a legacy location written
+as `NE NE SE Sec. 11, A-54E`.*
+
+- **Footage notation** gives the north-south distance first from `FNL` or
+  `FSL`, followed by the east-west distance from `FEL` or `FWL`. For example,
+  `2400 FSL, 1800 FEL, Sec. 11, 7S-39E` describes a point measured from the
+  south and east section lines.
+
+    ![Bulletin 76 Carter grid and footage notation](explanation/CarterCoords_Bull76_sm.png)
+
+    *Bulletin 76 illustration: Carter grids within a 7.5-minute topographic quadrangle and
 the footage-from-section-lines convention.*
 
 The converter also accepts incomplete Carter locations. Township/range alone
