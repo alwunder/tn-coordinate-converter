@@ -3,7 +3,7 @@
 Tennessee Coordinate Converter is a desktop and command-line application for
 converting between coordinate systems commonly used in Tennessee. Geographic (Lat/Lon), Tennessee State
 Plane, and UTM coordinates in common datums are supported. Additionally, the arcane Carter
-coordinate system used in Tennessee historically for locating wells is also supported. 
+coordinate system used historically in Tennessee for locating wells is also supported. 
 
 The project is being prepared as an open-source repository at
 [alwunder/tn-coordinate-converter](https://github.com/alwunder/tn-coordinate-converter).
