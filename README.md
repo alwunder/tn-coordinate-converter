@@ -8,6 +8,44 @@ coordinate system used historically in Tennessee for locating wells is also supp
 The project is being prepared as an open-source repository at
 [alwunder/tn-coordinate-converter](https://github.com/alwunder/tn-coordinate-converter).
 
+## Windows — Ready-to-run deployment
+
+For most Windows users, the easiest installation is the ready-to-run Windows ZIP on the
+[GitHub Releases page](https://github.com/alwunder/tn-coordinate-converter/releases).
+Download the Windows deployment ZIP attached to the release—not GitHub's automatic
+**Source code (zip)** archive—then:
+
+1. Extract the complete ZIP into a folder you can write to, such as Documents or Downloads.
+   Do not run the application from inside the ZIP.
+2. Double-click **Run Tn Coordinate Converter.bat**.
+3. The first launch prepares a private Python runtime and application environment for your
+   Windows account. Later launches normally use the fast path and open much more quickly.
+
+The ready-to-run deployment does not require administrator rights, a preinstalled Python or uv,
+Git, pip, virtual-environment knowledge, or PowerShell. It does not modify PATH or system Python.
+
+The deployment ZIP contains its verified bootstrap tool, but first setup still requires permitted
+HTTPS access to download managed Python and the locked Python packages. Network operations use the
+Windows certificate store, including organizational trust roots. The deployment does not bypass
+certificate, proxy, firewall, endpoint-security, or other organizational policy.
+
+Use **Diagnose Tn Coordinate Converter.bat** to report deployment, environment, approved-artifact,
+and WebView2 status. Use **Repair Tn Coordinate Converter Environment.bat** to rebuild only this
+user's application environment without changing application source or unrelated Python installs.
+Deployment logs are stored under:
+
+```text
+%LOCALAPPDATA%\PythonDeploymentBuilder\apps\tn-coordinate-converter\logs\
+```
+
+### View on Map
+
+**View on Map** opens the converted location in NGMDB MapView. This feature requires Microsoft
+Edge WebView2 Runtime and network access to `ngmdb.usgs.gov`. WebView2 is treated as an external
+Windows runtime: the deployment diagnoses whether it is present but does not silently install
+system software or request elevation. Core coordinate conversion remains available when the map
+runtime or network service is unavailable.
+
 ## Features
 
 - Convert a single coordinate in the Tkinter desktop interface.
@@ -86,7 +124,7 @@ Historical source material is available in the
 [Carter explanation document](<explanation/Explanation of Carter Coordinate System.docx>)
 and its [plain-text transcription](explanation/CarterCoordExpText.txt).
 
-## Requirements
+## Developer/source requirements
 
 - Python 3.10 or newer
 - `pyproj` for geographic and projected transformations
@@ -98,7 +136,7 @@ and its [plain-text transcription](explanation/CarterCoordExpText.txt).
 Coordinate conversion works without internet access. The NGMDB map requires
 access to `https://ngmdb.usgs.gov`.
 
-## Install from source
+## Developer installation from source
 
 Clone the repository and create an isolated environment:
 
