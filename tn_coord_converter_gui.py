@@ -63,7 +63,17 @@ MAPVIEW_DEFAULT_SCALE_BIN = "mvCache24K"
 
 # Common Tennessee-centric CRS options.
 FORMATS: Dict[str, Dict[str, Any]] = {
-    "CARTER": {"label": "Carter Coordinates", "kind": "carter", "crs": None},
+    "CARTER_QUADRANT": {
+        "label": "Carter Coordinates (Quadrant)",
+        "kind": "carter",
+        "crs": None,
+        "can_target": False,
+    },
+    "CARTER": {
+        "label": "Carter Coordinates (Footage)",
+        "kind": "carter",
+        "crs": None,
+    },
     "GEOGRAPHIC_NAD27": {"label": "Latitude/Longitude (NAD27)", "kind": "geographic", "crs": "EPSG:4267"},
     "GEOGRAPHIC_NAD83": {"label": "Latitude/Longitude (NAD83)", "kind": "geographic", "crs": "EPSG:4269"},
     "GEOGRAPHIC_WGS84": {"label": "Latitude/Longitude (WGS84)", "kind": "geographic", "crs": "EPSG:4326"},
@@ -79,6 +89,18 @@ FORMATS: Dict[str, Dict[str, Any]] = {
 }
 
 FORMAT_LABEL_TO_KEY = {v["label"]: k for k, v in FORMATS.items()}
+SOURCE_FORMAT_LABELS = tuple(v["label"] for v in FORMATS.values())
+TARGET_FORMAT_KEYS = tuple(k for k, v in FORMATS.items() if v.get("can_target", True))
+TARGET_FORMAT_LABELS = tuple(FORMATS[key]["label"] for key in TARGET_FORMAT_KEYS)
+CARTER_SOURCE_FORMATS = {"CARTER", "CARTER_QUADRANT"}
+
+GEOGRAPHIC_DISPLAY_FORMATS = (
+    "DD",
+    "DMS (symbols)",
+    "DMS (spaces)",
+    "DDM (symbols)",
+    "DDM (spaces)",
+)
 
 README_FILENAME = "README.md"
 _MARKDOWN_INLINE_RE = re.compile(
@@ -358,6 +380,131 @@ def normalize_range(value: Any) -> str:
     return normalize_text(value)
 
 
+def parse_geographic_coordinate(value: Any, axis: str) -> float:
+    """Parse decimal degrees, DDM, or DMS text for one geographic axis."""
+
+    if axis not in {"lat", "lon"}:
+        raise ValueError("Geographic coordinate axis must be 'lat' or 'lon'.")
+
+    field_name = "Latitude" if axis == "lat" else "Longitude"
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"{field_name} is required.")
+
+    text = str(value).strip().upper().replace("\N{MINUS SIGN}", "-")
+    hemispheres = re.findall(r"[NSEW]", text)
+    if len(hemispheres) > 1:
+        raise ValueError(f"{field_name} must contain at most one direction letter.")
+
+    hemisphere = hemispheres[0] if hemispheres else None
+    allowed_hemispheres = {"N", "S"} if axis == "lat" else {"E", "W"}
+    if hemisphere is not None and hemisphere not in allowed_hemispheres:
+        expected = "N or S" if axis == "lat" else "E or W"
+        raise ValueError(f"{field_name} direction must be {expected}.")
+
+    unsigned_text = re.sub(r"[NSEW]", " ", text)
+    cleaned = re.sub(
+        r"[\N{DEGREE SIGN}\N{MASCULINE ORDINAL INDICATOR}\N{RING ABOVE}]",
+        " ",
+        unsigned_text,
+    )
+    cleaned = re.sub(r"['\N{RIGHT SINGLE QUOTATION MARK}\N{PRIME}]", " ", cleaned)
+    cleaned = re.sub(r'["\N{RIGHT DOUBLE QUOTATION MARK}\N{DOUBLE PRIME}]', " ", cleaned)
+    cleaned = re.sub(r"[:,;]", " ", cleaned).strip()
+    number = r"(?:\d+(?:\.\d*)?|\.\d+)"
+    if not re.fullmatch(rf"[+-]?{number}(?:\s+{number}){{0,2}}", cleaned):
+        raise ValueError(
+            f"{field_name} must be decimal degrees, degrees/minutes, or "
+            "degrees/minutes/seconds."
+        )
+
+    parts = cleaned.split()
+    degrees = float(parts[0])
+    minutes = float(parts[1]) if len(parts) >= 2 else 0.0
+    seconds = float(parts[2]) if len(parts) == 3 else 0.0
+    if minutes >= 60.0:
+        raise ValueError(f"{field_name} minutes must be less than 60.")
+    if seconds >= 60.0:
+        raise ValueError(f"{field_name} seconds must be less than 60.")
+
+    explicit_negative = parts[0].startswith("-")
+    magnitude = abs(degrees) + minutes / 60.0 + seconds / 3600.0
+    if hemisphere in {"S", "W"}:
+        parsed = -magnitude
+    elif hemisphere in {"N", "E"}:
+        if explicit_negative:
+            raise ValueError(
+                f"{field_name} cannot combine a negative sign with direction {hemisphere}."
+            )
+        parsed = magnitude
+    else:
+        parsed = -magnitude if explicit_negative else magnitude
+
+    limit = 90.0 if axis == "lat" else 180.0
+    if not math.isfinite(parsed) or not (-limit <= parsed <= limit):
+        raise ValueError(f"{field_name} must be between {-limit:g} and {limit:g}.")
+    return parsed
+
+
+def _coordinate_parts(
+    value: Any,
+    axis: str,
+    minute_precision: int = 3,
+) -> Tuple[int, int, float, str]:
+    """Return rounded absolute DMS parts and a direction letter."""
+
+    coordinate = float(value)
+    if not math.isfinite(coordinate):
+        raise ValueError("Coordinate must be a finite number.")
+    limit = 90.0 if axis == "lat" else 180.0
+    if not (-limit <= coordinate <= limit):
+        label = "Latitude" if axis == "lat" else "Longitude"
+        raise ValueError(f"{label} must be between {-limit:g} and {limit:g}.")
+
+    direction = (
+        ("S" if coordinate < 0 else "N")
+        if axis == "lat"
+        else ("W" if coordinate < 0 else "E")
+    )
+    absolute = abs(coordinate)
+    degrees = int(absolute)
+    minute_total = (absolute - degrees) * 60.0
+    minutes = int(minute_total)
+    seconds = round((minute_total - minutes) * 60.0, minute_precision)
+    if seconds >= 60.0:
+        minutes += 1
+        seconds = 0.0
+    if minutes >= 60:
+        degrees += 1
+        minutes = 0
+    return degrees, minutes, seconds, direction
+
+
+def format_geographic_coordinate_for_clipboard(
+    value: Any,
+    axis: str,
+    output_format: str = "DD",
+) -> str:
+    """Format a latitude or longitude for clipboard output."""
+
+    if output_format == "DD":
+        return format_coordinate_for_clipboard(value)
+    if output_format not in GEOGRAPHIC_DISPLAY_FORMATS:
+        raise ValueError(f"Unsupported geographic output format: {output_format}")
+
+    degrees, minutes, seconds, direction = _coordinate_parts(value, axis)
+    if output_format.startswith("DMS"):
+        seconds_text = f"{seconds:.3f}"
+        if output_format == "DMS (symbols)":
+            return f'{degrees}\N{DEGREE SIGN} {minutes}\' {seconds_text}" {direction}'
+        return f"{degrees} {minutes} {seconds_text} {direction}"
+
+    decimal_minutes = minutes + seconds / 60.0
+    minutes_text = f"{decimal_minutes:.3f}"
+    if output_format == "DDM (symbols)":
+        return f"{degrees}\N{DEGREE SIGN} {minutes_text}' {direction}"
+    return f"{degrees} {minutes_text} {direction}"
+
+
 def make_cartercord(section: Any, township: Any, range_: Any) -> str:
     if section is None or str(section).strip() == "":
         return f"{normalize_township(township)}-{normalize_range(range_)}"
@@ -560,7 +707,7 @@ class CoordinateConverter:
             raise ValueError(f"{field_name} must be a whole number.") from exc
 
     def _validate_source_payload(self, source_fmt: str, payload: Dict[str, Any]) -> None:
-        if source_fmt == "CARTER":
+        if source_fmt in CARTER_SOURCE_FORMATS:
             required_location = [
                 ("township", "Township"),
                 ("range", "Range"),
@@ -575,21 +722,21 @@ class CoordinateConverter:
             has_section = not self._is_blank(payload.get("section"))
             if has_section:
                 self._parse_int("Section", payload["section"])
-            has_quadrants = not self._is_blank(payload.get("quadrants"))
+
+            if source_fmt == "CARTER_QUADRANT":
+                has_quadrants = not self._is_blank(payload.get("quadrants"))
+                if has_quadrants:
+                    if not has_section:
+                        raise ValueError(
+                            "A Carter section is required when quadrants are provided."
+                        )
+                    normalize_carter_quadrants(payload["quadrants"])
+                return
+
             has_any_footage = any(
                 not self._is_blank(payload.get(key))
                 for key in ("ns_feet", "ew_feet")
             )
-            if has_quadrants:
-                if not has_section:
-                    raise ValueError("A Carter section is required when quadrants are provided.")
-                if has_any_footage:
-                    raise ValueError(
-                        "Enter either legacy Carter quadrants or footage from section lines, not both."
-                    )
-                normalize_carter_quadrants(payload["quadrants"])
-                return
-
             if not has_any_footage:
                 # Township/range alone and township/range/section are valid
                 # incomplete locations represented by their bounding center.
@@ -608,8 +755,7 @@ class CoordinateConverter:
             ]
             if missing_footage:
                 raise ValueError(
-                    "Enter legacy Carter quadrants or all footage fields. "
-                    f"Missing footage field(s): {', '.join(missing_footage)}."
+                    f"Missing Carter footage field(s): {', '.join(missing_footage)}."
                 )
 
             ns_feet = self._parse_float("N-S Distance (ns_feet)", payload["ns_feet"])
@@ -631,12 +777,8 @@ class CoordinateConverter:
         if source_kind == "geographic":
             if self._is_blank(payload.get("lon")) or self._is_blank(payload.get("lat")):
                 raise ValueError("Longitude and Latitude are required.")
-            lon = self._parse_float("Longitude", payload["lon"])
-            lat = self._parse_float("Latitude", payload["lat"])
-            if not (-180.0 <= lon <= 180.0):
-                raise ValueError("Longitude must be between -180 and 180.")
-            if not (-90.0 <= lat <= 90.0):
-                raise ValueError("Latitude must be between -90 and 90.")
+            parse_geographic_coordinate(payload["lon"], "lon")
+            parse_geographic_coordinate(payload["lat"], "lat")
             return
 
         if self._is_blank(payload.get("x")) or self._is_blank(payload.get("y")):
@@ -649,20 +791,25 @@ class CoordinateConverter:
             raise ValueError(f"Unsupported source format: {source_fmt}")
         if target_fmt not in FORMATS:
             raise ValueError(f"Unsupported target format: {target_fmt}")
+        if target_fmt not in TARGET_FORMAT_KEYS:
+            raise ValueError(f"{FORMATS[target_fmt]['label']} is input-only.")
         if source_fmt == target_fmt:
             raise ValueError("Source and target formats are the same. Choose different formats to convert.")
 
         self._validate_source_payload(source_fmt, payload)
 
-        if source_fmt == "CARTER":
-            if not self._is_blank(payload.get("quadrants")):
+        if source_fmt in CARTER_SOURCE_FORMATS:
+            if (
+                source_fmt == "CARTER_QUADRANT"
+                and not self._is_blank(payload.get("quadrants"))
+            ):
                 carter = self.carter_quadrant_to_nad27(
                     payload["section"],
                     payload["township"],
                     payload["range"],
                     payload["quadrants"],
                 )
-            elif any(
+            elif source_fmt == "CARTER" and any(
                 not self._is_blank(payload.get(key))
                 for key in ("ns_feet", "ew_feet")
             ):
@@ -677,7 +824,23 @@ class CoordinateConverter:
                     section=payload.get("section"),
                 )
             if target_fmt == "CARTER":
-                return self._carter_result_to_dict(carter)
+                footage = self.nad27_to_carter(carter.nad27_lat, carter.nad27_lon)
+                footage.carter_complete = carter.carter_complete
+                footage.location_method = "derived_footage_from_carter_area_center"
+                footage.location_note = (
+                    "Footage notation derived from the center of the supplied legacy "
+                    "Carter area; it does not add precision to the historical location."
+                )
+                out = self._carter_result_to_dict(footage)
+                spc_x, spc_y = self.project(
+                    carter.nad27_lon,
+                    carter.nad27_lat,
+                    "GEOGRAPHIC_NAD27",
+                    "TNSPC_NAD27",
+                )
+                out["tnspc_nad27_x"] = spc_x
+                out["tnspc_nad27_y"] = spc_y
+                return out
             if target_fmt == "GEOGRAPHIC_NAD27":
                 return self._compose_output(
                     target_fmt,
@@ -699,8 +862,8 @@ class CoordinateConverter:
 
         source_kind = FORMATS[source_fmt]["kind"]
         if source_kind == "geographic":
-            lon = float(payload["lon"])
-            lat = float(payload["lat"])
+            lon = parse_geographic_coordinate(payload["lon"], "lon")
+            lat = parse_geographic_coordinate(payload["lat"], "lat")
             x, y = self.project(lon, lat, source_fmt, target_fmt)
         else:
             x, y = self.project(float(payload["x"]), float(payload["y"]), source_fmt, target_fmt)
@@ -709,9 +872,14 @@ class CoordinateConverter:
 
     def _to_nad27_xy(self, source_fmt: str, payload: Dict[str, Any]) -> Tuple[float, float]:
         if source_fmt == "GEOGRAPHIC_NAD27":
-            return float(payload["lon"]), float(payload["lat"])
+            return (
+                parse_geographic_coordinate(payload["lon"], "lon"),
+                parse_geographic_coordinate(payload["lat"], "lat"),
+            )
         if FORMATS[source_fmt]["kind"] == "geographic":
-            lon27, lat27 = self.project(float(payload["lon"]), float(payload["lat"]), source_fmt, "GEOGRAPHIC_NAD27")
+            lon = parse_geographic_coordinate(payload["lon"], "lon")
+            lat = parse_geographic_coordinate(payload["lat"], "lat")
+            lon27, lat27 = self.project(lon, lat, source_fmt, "GEOGRAPHIC_NAD27")
             return lon27, lat27
         lon27, lat27 = self.project(float(payload["x"]), float(payload["y"]), source_fmt, "GEOGRAPHIC_NAD27")
         return lon27, lat27
@@ -774,20 +942,27 @@ def _first(record: Dict[str, Any], keys: Iterable[str], default: Any = None) -> 
 
 
 def parse_record_payload(record: Dict[str, Any], source_fmt: str) -> Dict[str, Any]:
-    if source_fmt == "CARTER":
-        return {
+    if source_fmt in CARTER_SOURCE_FORMATS:
+        payload = {
             "section": _first(record, ["section"]),
             "township": _first(record, ["township"]),
             "range": _first(record, ["range", "range_"]),
-            "ns_feet": _first(record, ["ns_feet", "north_south_feet"]),
-            "ns_line": _first(record, ["fsl_fnl", "ns_line"]),
-            "ew_feet": _first(record, ["ew_feet", "east_west_feet"]),
-            "ew_line": _first(record, ["fwl_fel", "ew_line"]),
-            "quadrants": _first(
+        }
+        if source_fmt == "CARTER_QUADRANT":
+            payload["quadrants"] = _first(
                 record,
                 ["quadrants", "quadrant", "quarter_calls", "quarter_quadrants"],
-            ),
-        }
+            )
+        else:
+            payload.update(
+                {
+                    "ns_feet": _first(record, ["ns_feet", "north_south_feet"]),
+                    "ns_line": _first(record, ["fsl_fnl", "ns_line"]),
+                    "ew_feet": _first(record, ["ew_feet", "east_west_feet"]),
+                    "ew_line": _first(record, ["fwl_fel", "ew_line"]),
+                }
+            )
+        return payload
     if FORMATS[source_fmt]["kind"] == "geographic":
         return {
             "lon": _first(record, ["lon", "longitude", "x_lon27", "x_lon83", "x"]),
@@ -802,6 +977,13 @@ def parse_record_payload(record: Dict[str, Any], source_fmt: str) -> Dict[str, A
 def detect_source_format(record: Dict[str, Any]) -> str:
     keys = {str(k).strip().lower() for k in record.keys()}
     if "township" in keys and ({"range", "range_"} & keys):
+        if {
+            "quadrants",
+            "quadrant",
+            "quarter_calls",
+            "quarter_quadrants",
+        } & keys:
+            return "CARTER_QUADRANT"
         return "CARTER"
     if "y_lat27" in keys or "x_lon27" in keys:
         return "GEOGRAPHIC_NAD27"
@@ -909,6 +1091,8 @@ def batch_convert(converter: CoordinateConverter, input_path: Path, output_path:
 
     if target_fmt not in FORMATS:
         raise ValueError(f"Unsupported target format: {target_fmt}")
+    if target_fmt not in TARGET_FORMAT_KEYS:
+        raise ValueError(f"{FORMATS[target_fmt]['label']} is input-only.")
 
     records = read_records(input_path)
     if not records:
@@ -945,7 +1129,9 @@ class App:
         self.input_path_var = tk.StringVar()
         self.output_path_var = tk.StringVar()
         self.active_copy_xy: Optional[Tuple[Any, Any]] = None
+        self.active_copy_target_fmt: Optional[str] = None
         self.invert_copy_var = tk.BooleanVar(value=False)
+        self.geographic_display_var = tk.StringVar(value="DD")
 
         self._build_ui()
         self._update_single_mode()
@@ -971,13 +1157,14 @@ class App:
         top.pack(fill="x", padx=8, pady=8)
 
         ttk.Label(top, text="Source format").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        src_combo = ttk.Combobox(top, textvariable=self.single_source_var, values=list(FORMAT_LABEL_TO_KEY.keys()), state="readonly", width=42)
+        src_combo = ttk.Combobox(top, textvariable=self.single_source_var, values=SOURCE_FORMAT_LABELS, state="readonly", width=42)
         src_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
         src_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_single_mode())
 
         ttk.Label(top, text="Target format").grid(row=0, column=2, sticky="w", padx=6, pady=6)
-        tgt_combo = ttk.Combobox(top, textvariable=self.single_target_var, values=list(FORMAT_LABEL_TO_KEY.keys()), state="readonly", width=42)
+        tgt_combo = ttk.Combobox(top, textvariable=self.single_target_var, values=TARGET_FORMAT_LABELS, state="readonly", width=42)
         tgt_combo.grid(row=0, column=3, sticky="ew", padx=6, pady=6)
+        tgt_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_single_target_changed())
         top.columnconfigure(1, weight=1)
         top.columnconfigure(3, weight=1)
 
@@ -1029,30 +1216,38 @@ class App:
             ttk.Label(self.footage_frame, text=label).grid(row=row, column=col, sticky="w", padx=6, pady=6)
             if key in {"ns_line", "ew_line"}:
                 values = ["FSL", "FNL"] if key == "ns_line" else ["FWL", "FEL"]
-                ttk.Combobox(self.footage_frame, textvariable=self.carter_vars[key], values=values, state="readonly", width=14).grid(
-                    row=row, column=col + 1, sticky="ew", padx=6, pady=6
+                widget = ttk.Combobox(
+                    self.footage_frame,
+                    textvariable=self.carter_vars[key],
+                    values=values,
+                    state="readonly",
+                    width=14,
                 )
             else:
-                ttk.Entry(self.footage_frame, textvariable=self.carter_vars[key], width=18).grid(
-                    row=row, column=col + 1, sticky="ew", padx=6, pady=6
+                widget = ttk.Entry(
+                    self.footage_frame,
+                    textvariable=self.carter_vars[key],
+                    width=18,
                 )
+            widget.grid(row=row, column=col + 1, sticky="ew", padx=6, pady=6)
 
-        quadrant_frame = ttk.LabelFrame(
+        self.quadrant_frame = ttk.LabelFrame(
             self.carter_frame,
-            text="Legacy Quadrant Location (use instead of footage)",
+            text="Legacy Quadrant Location",
         )
-        quadrant_frame.grid(row=2, column=0, columnspan=6, sticky="ew", padx=6, pady=6)
-        quadrant_frame.columnconfigure(1, weight=1)
-        ttk.Label(quadrant_frame, text="Quadrants").grid(
+        self.quadrant_frame.grid(row=1, column=0, columnspan=6, sticky="ew", padx=6, pady=6)
+        self.quadrant_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.quadrant_frame, text="Quadrants").grid(
             row=0, column=0, sticky="w", padx=6, pady=6
         )
-        ttk.Entry(
-            quadrant_frame,
+        self.quadrant_entry = ttk.Entry(
+            self.quadrant_frame,
             textvariable=self.carter_vars["quadrants"],
             width=30,
-        ).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        )
+        self.quadrant_entry.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
         ttk.Label(
-            quadrant_frame,
+            self.quadrant_frame,
             text=(
                 "Calls are smallest to largest: 1 = largest; 2 = middle, largest; "
                 "3 = smallest, middle, largest. The resolved area center is used."
@@ -1081,6 +1276,15 @@ class App:
 
         copy_row = ttk.Frame(button_row)
         copy_row.pack(side="right")
+        ttk.Label(copy_row, text="Copy format:").pack(side="left", padx=(0, 6))
+        self.geographic_display_combo = ttk.Combobox(
+            copy_row,
+            textvariable=self.geographic_display_var,
+            values=GEOGRAPHIC_DISPLAY_FORMATS,
+            state="disabled",
+            width=20,
+        )
+        self.geographic_display_combo.pack(side="left", padx=(0, 6))
         self.copy_x_button = ttk.Button(
             copy_row,
             text="Copy X",
@@ -1110,7 +1314,7 @@ class App:
         )
         self.invert_copy_checkbox.pack(side="left", padx=(6, 0))
 
-        self.single_output = tk.Text(parent, height=20, wrap="word")
+        self.single_output = ScrolledText(parent, height=20, wrap="word")
         self.single_output.pack(fill="both", expand=True, padx=8, pady=8)
 
     def _build_batch_tab(self, parent: ttk.Frame) -> None:
@@ -1126,16 +1330,16 @@ class App:
         ttk.Button(settings, text="Browse", command=self.browse_output).grid(row=1, column=2, padx=6, pady=6)
 
         ttk.Label(settings, text="Source format").grid(row=2, column=0, sticky="w", padx=6, pady=6)
-        ttk.Combobox(settings, textvariable=self.batch_source_var, values=["AUTO", *FORMAT_LABEL_TO_KEY.keys()], state="readonly", width=40).grid(row=2, column=1, sticky="w", padx=6, pady=6)
+        ttk.Combobox(settings, textvariable=self.batch_source_var, values=["AUTO", *SOURCE_FORMAT_LABELS], state="readonly", width=40).grid(row=2, column=1, sticky="w", padx=6, pady=6)
 
         ttk.Label(settings, text="Target format").grid(row=3, column=0, sticky="w", padx=6, pady=6)
-        ttk.Combobox(settings, textvariable=self.batch_target_var, values=list(FORMAT_LABEL_TO_KEY.keys()), state="readonly", width=40).grid(row=3, column=1, sticky="w", padx=6, pady=6)
+        ttk.Combobox(settings, textvariable=self.batch_target_var, values=TARGET_FORMAT_LABELS, state="readonly", width=40).grid(row=3, column=1, sticky="w", padx=6, pady=6)
 
         settings.columnconfigure(1, weight=1)
 
         help_text = (
-            "Carter input requires township and range. Section, legacy quadrants, and footage are "
-            "optional refinements; incomplete areas resolve to their center.\n"
+            "Choose Carter Quadrant or Carter Footage input. Both require township and range; "
+            "incomplete areas resolve to their center.\n"
             "Supported geographic-style input columns: lat/lon, latitude/longitude, or y_lat27/x_lon27.\n"
             "For projected coordinates, use generic x and y columns and choose the source format explicitly."
         )
@@ -1248,10 +1452,16 @@ class App:
 
     def _update_single_mode(self) -> None:
         source_key = FORMAT_LABEL_TO_KEY.get(self.single_source_var.get(), self.single_source_var.get())
-        if source_key == "CARTER":
-            self.carter_frame.configure(text="Carter Coordinate Inputs")
+        if source_key in CARTER_SOURCE_FORMATS:
+            self.carter_frame.configure(text=f"{FORMATS[source_key]['label']} Inputs")
             self.xy_frame.grid_remove()
             self.carter_frame.grid()
+            if source_key == "CARTER_QUADRANT":
+                self.footage_frame.grid_remove()
+                self.quadrant_frame.grid()
+            else:
+                self.quadrant_frame.grid_remove()
+                self.footage_frame.grid()
             self.xy_x_label.configure(text="Longitude / X")
             self.xy_y_label.configure(text="Latitude / Y")
         else:
@@ -1265,6 +1475,18 @@ class App:
                 self.xy_x_label.configure(text="X / Easting")
                 self.xy_y_label.configure(text="Y / Northing")
             self.xy_frame.configure(text=f"Coordinate Inputs for {fmt['label']}")
+
+    def _on_single_target_changed(self) -> None:
+        self._clear_active_copy_pair()
+        self._clear_active_map_point()
+        target_fmt = FORMAT_LABEL_TO_KEY.get(
+            self.single_target_var.get(), self.single_target_var.get()
+        )
+        is_geographic = target_fmt in FORMATS and FORMATS[target_fmt]["kind"] == "geographic"
+        self.geographic_display_combo.configure(
+            state="readonly" if is_geographic else "disabled"
+        )
+        self.update_copy_pair_label()
 
     def _crs_metadata(self, fmt_key: str) -> Optional[Dict[str, Any]]:
         fmt = FORMATS[fmt_key]
@@ -1307,7 +1529,7 @@ class App:
         output_values: Dict[str, Any],
     ) -> Dict[str, Any]:
         display_outputs = dict(output_values)
-        if source_fmt == "CARTER":
+        if source_fmt in CARTER_SOURCE_FORMATS and target_fmt != "CARTER":
             carter_input_keys = {
                 "section",
                 "township",
@@ -1358,6 +1580,7 @@ class App:
 
     def _clear_active_copy_pair(self) -> None:
         self.active_copy_xy = None
+        self.active_copy_target_fmt = None
         self.copy_x_button.configure(state="disabled")
         self.copy_y_button.configure(state="disabled")
         self.copy_pair_button.configure(state="disabled")
@@ -1372,25 +1595,56 @@ class App:
         except (KeyError, ValueError):
             self._clear_active_copy_pair()
             return
+        self.active_copy_target_fmt = target_fmt
+        self.geographic_display_combo.configure(
+            state="readonly" if FORMATS[target_fmt]["kind"] == "geographic" else "disabled"
+        )
         self.copy_x_button.configure(state="normal")
         self.copy_y_button.configure(state="normal")
         self.copy_pair_button.configure(state="normal")
+        self.update_copy_pair_label()
 
     def update_copy_pair_label(self) -> None:
-        label = "Y,X" if self.invert_copy_var.get() else "X,Y"
+        target_fmt = self.active_copy_target_fmt
+        if target_fmt is None:
+            target_fmt = FORMAT_LABEL_TO_KEY.get(
+                self.single_target_var.get(), self.single_target_var.get()
+            )
+        geographic = target_fmt in FORMATS and FORMATS[target_fmt]["kind"] == "geographic"
+        x_label, y_label = ("Lon", "Lat") if geographic else ("X", "Y")
+        self.copy_x_button.configure(text=f"Copy {x_label}")
+        self.copy_y_button.configure(text=f"Copy {y_label}")
+        label = (
+            f"{y_label},{x_label}"
+            if self.invert_copy_var.get()
+            else f"{x_label},{y_label}"
+        )
         self.copy_pair_button.configure(text=f"Copy {label}")
 
     def copy_coordinate(self, component: str) -> None:
         if self.active_copy_xy is None:
             return
         x, y = self.active_copy_xy
+        geographic = (
+            self.active_copy_target_fmt is not None
+            and FORMATS[self.active_copy_target_fmt]["kind"] == "geographic"
+        )
+        if geographic:
+            output_format = self.geographic_display_var.get()
+            x_text = format_geographic_coordinate_for_clipboard(x, "lon", output_format)
+            y_text = format_geographic_coordinate_for_clipboard(y, "lat", output_format)
+        else:
+            x_text = format_coordinate_for_clipboard(x)
+            y_text = format_coordinate_for_clipboard(y)
         if component == "x":
-            text = format_coordinate_for_clipboard(x)
+            text = x_text
         elif component == "y":
-            text = format_coordinate_for_clipboard(y)
+            text = y_text
         elif component == "pair":
-            order = "yx" if self.invert_copy_var.get() else "xy"
-            text = format_coordinate_pair_for_clipboard(x, y, order)
+            first, second = (
+                (y_text, x_text) if self.invert_copy_var.get() else (x_text, y_text)
+            )
+            text = f"{first},{second}"
         else:
             raise ValueError(f"Unsupported coordinate component: {component}")
         self.root.clipboard_clear()
@@ -1450,6 +1704,7 @@ class App:
         self.carter_vars["ew_line"].set("FWL")
         self.xy_x_var.set("")
         self.xy_y_var.set("")
+        self.geographic_display_var.set("DD")
         self.invert_copy_var.set(False)
         self.update_copy_pair_label()
         self.single_output.delete("1.0", "end")
@@ -1467,15 +1722,17 @@ class App:
             if source_fmt == target_fmt:
                 raise ValueError("Source and target formats are the same. Choose different formats to convert.")
 
-            if source_fmt == "CARTER":
+            if source_fmt in CARTER_SOURCE_FORMATS:
                 common_carter_payload = {
                     "section": self.carter_vars["section"].get(),
                     "township": self.carter_vars["township"].get(),
                     "range": self.carter_vars["range"].get(),
                 }
-                quadrants = self.carter_vars["quadrants"].get()
-                if quadrants.strip():
-                    payload = {**common_carter_payload, "quadrants": quadrants}
+                if source_fmt == "CARTER_QUADRANT":
+                    payload = {
+                        **common_carter_payload,
+                        "quadrants": self.carter_vars["quadrants"].get(),
+                    }
                 else:
                     payload = {
                         **common_carter_payload,
@@ -1493,6 +1750,7 @@ class App:
             display = self._single_output_payload(source_fmt, target_fmt, payload, result)
             self.single_output.delete("1.0", "end")
             self.single_output.insert("1.0", json.dumps(display, indent=2))
+            self.single_output.see("end")
             self._update_copy_pair_from_result(target_fmt, result)
             self._update_map_point_from_result(target_fmt, result)
         except Exception as exc:
@@ -1551,7 +1809,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", help="Input CSV or JSON file for batch conversion")
     parser.add_argument("--output", help="Output CSV or JSON file for batch conversion")
     parser.add_argument("--source-format", default="AUTO", choices=["AUTO", *FORMATS.keys()], help="Source coordinate format for batch conversion")
-    parser.add_argument("--target-format", choices=list(FORMATS.keys()), help="Target coordinate format for batch conversion")
+    parser.add_argument("--target-format", choices=TARGET_FORMAT_KEYS, help="Target coordinate format for batch conversion")
     parser.add_argument("--no-gui", action="store_true", help="Run without the Tkinter GUI")
     parser.add_argument("--mapview-browser", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
