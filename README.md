@@ -8,44 +8,6 @@ coordinate system used historically in Tennessee for locating wells is also supp
 The project is being prepared as an open-source repository at
 [alwunder/tn-coordinate-converter](https://github.com/alwunder/tn-coordinate-converter).
 
-## Windows — Ready-to-run deployment
-
-For most Windows users, the easiest installation is the ready-to-run Windows ZIP on the
-[GitHub Releases page](https://github.com/alwunder/tn-coordinate-converter/releases).
-Download the Windows deployment ZIP attached to the release—not GitHub's automatic
-**Source code (zip)** archive—then:
-
-1. Extract the complete ZIP into a folder you can write to, such as Documents or Downloads.
-   Do not run the application from inside the ZIP.
-2. Double-click **Run Tn Coordinate Converter.bat**.
-3. The first launch prepares a private Python runtime and application environment for your
-   Windows account. Later launches normally use the fast path and open much more quickly.
-
-The ready-to-run deployment does not require administrator rights, a preinstalled Python or uv,
-Git, pip, virtual-environment knowledge, or PowerShell. It does not modify PATH or system Python.
-
-The deployment ZIP contains its verified bootstrap tool, but first setup still requires permitted
-HTTPS access to download managed Python and the locked Python packages. Network operations use the
-Windows certificate store, including organizational trust roots. The deployment does not bypass
-certificate, proxy, firewall, endpoint-security, or other organizational policy.
-
-Use **Diagnose Tn Coordinate Converter.bat** to report deployment, environment, approved-artifact,
-and WebView2 status. Use **Repair Tn Coordinate Converter Environment.bat** to rebuild only this
-user's application environment without changing application source or unrelated Python installs.
-Deployment logs are stored under:
-
-```text
-%LOCALAPPDATA%\PythonDeploymentBuilder\apps\tn-coordinate-converter\logs\
-```
-
-### View on Map
-
-**View on Map** opens the converted location in NGMDB MapView. This feature requires Microsoft
-Edge WebView2 Runtime and network access to `ngmdb.usgs.gov`. WebView2 is treated as an external
-Windows runtime: the deployment diagnoses whether it is present but does not silently install
-system software or request elevation. Core coordinate conversion remains available when the map
-runtime or network service is unavailable.
-
 ## Features
 
 - Convert a single coordinate in the Tkinter desktop interface.
@@ -64,7 +26,8 @@ runtime or network service is unavailable.
 
 | Format | Command-line name | Units |
 | --- | --- | --- |
-| Carter Coordinates | `CARTER` | Grid/section notation; U.S. survey feet for footage offsets |
+| Carter Coordinates (Quadrant) | `CARTER_QUADRANT` | Legacy grid/section quadrant notation; input only |
+| Carter Coordinates (Footage) | `CARTER` | Grid/section notation; U.S. survey feet for footage offsets |
 | Latitude/Longitude (NAD27) | `GEOGRAPHIC_NAD27` | Decimal degrees |
 | Latitude/Longitude (NAD83) | `GEOGRAPHIC_NAD83` | Decimal degrees |
 | Latitude/Longitude (WGS84) | `GEOGRAPHIC_WGS84` | Decimal degrees |
@@ -103,8 +66,8 @@ Carter records use either of two location conventions within a section:
     *Bulletin 62 illustration: the 25-section grid and a legacy location written
 as `NE NE SE Sec. 11, A-54E`.*
 
-- **Footage notation** gives the north-south distance first from `FNL` or
-  `FSL`, followed by the east-west distance from `FEL` or `FWL`. For example,
+- **Footage notation** gives the distance first from the north or south line (`FNL` or
+  `FSL`), followed by the distance from the east or west line (`FEL` or `FWL`). For example,
   `2400 FSL, 1800 FEL, Sec. 11, 7S-39E` describes a point measured from the
   south and east section lines.
 
@@ -123,6 +86,44 @@ and `location_note` in the output.
 Historical source material is available in the
 [Carter explanation document](<explanation/Explanation of Carter Coordinate System.docx>)
 and its [plain-text transcription](explanation/CarterCoordExpText.txt).
+
+## Windows — Ready-to-run deployment
+
+For most Windows users, the easiest installation is the ready-to-run Windows ZIP on the
+[GitHub Releases page](https://github.com/alwunder/tn-coordinate-converter/releases).
+Download the Windows deployment ZIP attached to the release—not GitHub's automatic
+**Source code (zip)** archive—then:
+
+1. Extract the complete ZIP into a folder you can write to, such as Documents or Downloads.
+   Do not run the application from inside the ZIP.
+2. Double-click **Run Tn Coordinate Converter.bat**.
+3. The first launch prepares a private Python runtime and application environment for your
+   Windows account. Later launches normally use the fast path and open much more quickly.
+
+The ready-to-run deployment does not require administrator rights, a preinstalled Python or uv,
+Git, pip, virtual-environment knowledge, or PowerShell. It does not modify PATH or system Python.
+
+The deployment ZIP contains its verified bootstrap tool, but first setup still requires permitted
+HTTPS access to download managed Python and the locked Python packages. Network operations use the
+Windows certificate store, including organizational trust roots. The deployment does not bypass
+certificate, proxy, firewall, endpoint-security, or other organizational policy.
+
+Use **Diagnose Tn Coordinate Converter.bat** to report deployment, environment, approved-artifact,
+and WebView2 status. Use **Repair Tn Coordinate Converter Environment.bat** to rebuild only this
+user's application environment without changing application source or unrelated Python installs.
+Deployment logs are stored under:
+
+```text
+%LOCALAPPDATA%\PythonDeploymentBuilder\apps\tn-coordinate-converter\logs\
+```
+
+### View on Map
+
+**View on Map** opens the converted location in NGMDB MapView. This feature requires Microsoft
+Edge WebView2 Runtime and network access to `ngmdb.usgs.gov`. WebView2 is treated as an external
+Windows runtime: the deployment diagnoses whether it is present but does not silently install
+system software or request elevation. Core coordinate conversion remains available when the map
+runtime or network service is unavailable.
 
 ## Developer/source requirements
 
@@ -172,8 +173,9 @@ The desktop application contains three tabs:
 - **Batch Conversion** processes every record in a CSV or JSON file.
 - **About** displays this guide.
 
-For Carter input, provide section, township, range, north-south footage and
-reference line, and east-west footage and reference line. For example:
+Choose **Carter Coordinates (Footage)** for the newer notation, then provide
+section, township, range, north-south footage and reference line, and east-west
+footage and reference line. For example:
 
 ```text
 Section:       11
@@ -192,11 +194,10 @@ Latitude:   36.3714736806
 Longitude: -85.5935471530
 ```
 
-Legacy Bulletin 62 quadrant calls are also accepted in place of the four
-footage fields. Enter the calls from the smallest subdivision to the largest,
-as originally printed. Because a quadrant call identifies an area rather than
-an exact well point, the converter uses the center of the most specific
-subdivision supplied:
+Choose **Carter Coordinates (Quadrant)** for legacy Bulletin 62 quadrant calls.
+Enter the calls from the smallest subdivision to the largest, as originally
+printed. Because a quadrant call identifies an area rather than an exact well
+point, the converter uses the center of the most specific subdivision supplied:
 
 - One call is the largest quadrant.
 - Two calls are the middle and largest quadrants.
@@ -209,11 +210,18 @@ Range:      54E
 Quadrants:  NE NE SE
 ```
 
-After a successful single conversion, **Copy X**, **Copy Y**, and **Copy X,Y**
-copy result coordinates to the clipboard. Select **Invert** to change the
-combined button to **Copy Y,X**. Longitude is X and latitude is Y.
-For a Carter target, the copied X/Y pair is the accompanying Tennessee State
-Plane NAD27 coordinate.
+To express a legacy location in newer footage notation, select **Carter
+Coordinates (Quadrant)** as the source and **Carter Coordinates (Footage)** as
+the target. The reported footage locates the center of the supplied quadrant
+area, so it does not add precision to the historical location.
+
+After a successful single conversion, the copy buttons copy result coordinates
+to the clipboard. For a geographic target, choose decimal degrees (DD), DMS, or
+degrees with decimal minutes (DDM); DMS and DDM each have symbol and
+space-delimited variants. Select **Invert** to reverse the combined coordinate
+order. Longitude is X and latitude is Y.
+For a Carter Coordinates (Footage) target, the copied X/Y pair is the
+accompanying Tennessee State Plane NAD27 coordinate.
 
 Partial Carter coordinates are valid when township and range are known. A
 township/range-only record resolves to the center of its 5-minute quadrangle;
@@ -221,11 +229,15 @@ adding a section resolves to the center of that section. Outputs set
 `carter_complete` to `false` and include `location_method` and `location_note`
 so these approximate centers are not mistaken for precisely located points.
 
-For geographic input, enter longitude and latitude in decimal degrees. For a
-projected source, enter easting/X and northing/Y in the units listed above.
+Geographic input accepts decimal degrees, degrees/minutes/seconds, and degrees
+with decimal minutes. Direction letters may appear before or after the value,
+and degree/quote symbols or spaces may delimit the parts. For a projected
+source, enter easting/X and northing/Y in the units listed above.
 
-When Carter coordinates are the target, the result includes the containing
-section, township, range, and footage from the nearest section lines.
+When Carter Coordinates (Footage) is the target, the result includes the
+containing section, township, range, and footage from the nearest section lines.
+Quadrant notation is intentionally input-only because it identifies an area
+rather than a precise point.
 
 ## Batch conversion
 
@@ -253,10 +265,11 @@ Accepted Carter columns include:
 | E-W footage | `ew_feet` or `east_west_feet` |
 | E-W line | `fwl_fel` or `ew_line` |
 
-For a legacy Carter record, use `quadrants` (also accepted: `quadrant`,
-`quarter_calls`, or `quarter_quadrants`) instead of all four footage fields.
-Township and range are the minimum fields; section and quadrants may be left
-blank for poorly located records.
+For a legacy Carter record, choose the `CARTER_QUADRANT` source format and use
+`quadrants` (also accepted: `quadrant`, `quarter_calls`, or
+`quarter_quadrants`). Township and range are the minimum fields; section and
+quadrants may be left blank for poorly located records. `AUTO` selects
+`CARTER_QUADRANT` when one of those quadrant columns is present.
 
 ```csv
 section,township,range,quadrants
