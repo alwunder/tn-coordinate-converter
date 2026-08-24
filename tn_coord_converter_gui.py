@@ -18,14 +18,17 @@ import csv
 import importlib.util
 import json
 import math
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import traceback
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import unquote, urlsplit
 
 from tn_coord_converter_module import (
     carter_area_center_to_nad27 as module_carter_area_center_to_nad27,
@@ -109,29 +112,115 @@ _MARKDOWN_INLINE_RE = re.compile(
 _MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 _MARKDOWN_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+)$")
 _MARKDOWN_NUMBER_RE = re.compile(r"^\s*(\d+)\.\s+(.+)$")
+_MARKDOWN_IMAGE_RE = re.compile(
+    r"^!\[([^\]]*)\]\((?:<([^>]+)>|([^)]+))\)\s*$"
+)
 
 
-def resolve_readme_text() -> str:
-    """Load the README used by the formatted About tab."""
+def resolve_readme_document() -> Tuple[str, Optional[Path]]:
+    """Load the About-tab README and return its text and asset directory."""
 
     candidates: List[Path] = []
     if getattr(sys, "frozen", False):
         candidates.append(Path(sys.executable).resolve().with_name(README_FILENAME))
+        bundle_directory = getattr(sys, "_MEIPASS", None)
+        if bundle_directory:
+            candidates.append(Path(bundle_directory) / README_FILENAME)
     candidates.append(Path(__file__).resolve().with_name(README_FILENAME))
 
     for path in candidates:
         if path.is_file():
-            return path.read_text(encoding="utf-8")
+            return path.read_text(encoding="utf-8"), path.parent
 
     return (
-        "# Tennessee Coordinate Converter\n\n"
-        "The full user guide could not be loaded. Keep README.md beside the "
-        "application, or include it as data when building the executable.\n"
+        (
+            "# Tennessee Coordinate Converter\n\n"
+            "The full user guide could not be loaded. Keep README.md beside the "
+            "application, or include it as data when building the executable.\n"
+        ),
+        None,
     )
+
+
+def resolve_readme_text() -> str:
+    """Load the README text used by the formatted About tab."""
+
+    return resolve_readme_document()[0]
+
+
+def parse_markdown_image(line: str) -> Optional[Tuple[str, str]]:
+    """Return alt text and target for a standalone Markdown image line."""
+
+    match = _MARKDOWN_IMAGE_RE.fullmatch(line.strip())
+    if match is None:
+        return None
+    return match.group(1).strip(), (match.group(2) or match.group(3)).strip()
+
+
+def parse_markdown_link(token: str) -> Optional[Tuple[str, str]]:
+    """Return the label and target from one inline Markdown link token."""
+
+    match = re.fullmatch(r"\[([^\]]+)\]\(([^)]+)\)", token)
+    if match is None:
+        return None
+    label = match.group(1).strip()
+    target = match.group(2).strip()
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1].strip()
+    return label, target
+
+
+def resolve_markdown_image_path(target: str, asset_directory: Optional[Path]) -> Optional[Path]:
+    """Resolve a local Markdown image target relative to its document."""
+
+    if asset_directory is None or re.match(r"^[a-z][a-z0-9+.-]*://", target, re.IGNORECASE):
+        return None
+    path = Path(target)
+    if not path.is_absolute():
+        path = asset_directory / path
+    return path.resolve()
+
+
+def open_path_with_default_application(path: Path) -> None:
+    """Open a local file with the operating system's associated application."""
+
+    path = Path(path).resolve()
+    if sys.platform == "win32":
+        os.startfile(str(path))
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 def _markdown_tags(base_tag: Optional[str], inline_tag: Optional[str] = None) -> Tuple[str, ...]:
     return tuple(tag for tag in (base_tag, inline_tag) if tag)
+
+
+def _insert_markdown_link(
+    widget: tk.Text,
+    label: str,
+    target: str,
+    base_tag: Optional[str],
+) -> None:
+    """Insert a clean clickable link label into a Markdown Text widget."""
+
+    link_serial = getattr(widget, "_markdown_link_serial", 0) + 1
+    setattr(widget, "_markdown_link_serial", link_serial)
+    unique_tag = f"markdown_link_{link_serial}"
+    widget.insert(
+        "end",
+        label,
+        (*_markdown_tags(base_tag, "link"), unique_tag),
+    )
+
+    link_handler = getattr(widget, "_markdown_link_handler", None)
+    if link_handler is not None:
+        def activate_link(_event: Any, link_target: str = target) -> str:
+            link_handler(link_target)
+            return "break"
+
+        widget.tag_bind(unique_tag, "<Button-1>", activate_link)
 
 
 def _insert_markdown_inline(widget: tk.Text, text: str, base_tag: Optional[str] = None) -> None:
@@ -146,12 +235,12 @@ def _insert_markdown_inline(widget: tk.Text, text: str, base_tag: Optional[str] 
         elif token.startswith("`"):
             widget.insert("end", token[1:-1], _markdown_tags(base_tag, "inline_code"))
         else:
-            label, url = re.fullmatch(r"\[([^\]]+)\]\(([^)]+)\)", token).groups()
-            widget.insert(
-                "end",
-                f"{label} ({url})",
-                _markdown_tags(base_tag, "link"),
-            )
+            markdown_link = parse_markdown_link(token)
+            if markdown_link is None:
+                widget.insert("end", token, _markdown_tags(base_tag))
+            else:
+                label, target = markdown_link
+                _insert_markdown_link(widget, label, target, base_tag)
         position = match.end()
     widget.insert("end", text[position:], _markdown_tags(base_tag))
 
@@ -186,9 +275,51 @@ def _insert_markdown_table(widget: tk.Text, table_lines: List[str]) -> None:
         widget.insert("end", "\n")
 
 
-def render_markdown(widget: tk.Text, markdown_text: str) -> None:
+def _insert_markdown_image(
+    widget: tk.Text,
+    alt_text: str,
+    target: str,
+    asset_directory: Optional[Path],
+) -> None:
+    """Insert a local PNG image, with readable fallback text on failure."""
+
+    image_path = resolve_markdown_image_path(target, asset_directory)
+    try:
+        if image_path is None or not image_path.is_file():
+            raise FileNotFoundError(target)
+        image = tk.PhotoImage(master=widget, file=str(image_path))
+    except (FileNotFoundError, OSError, tk.TclError):
+        description = alt_text or Path(target).name or "unnamed image"
+        widget.insert(
+            "end",
+            f"[Image unavailable: {description} ({target})]\n\n",
+            "image_error",
+        )
+        return
+
+    # Tk discards images whose Python objects are garbage-collected, so keep
+    # references on the long-lived Text widget.
+    image_references = getattr(widget, "_markdown_image_references", None)
+    if image_references is None:
+        image_references = []
+        setattr(widget, "_markdown_image_references", image_references)
+    image_references.append(image)
+
+    start = widget.index("end-1c")
+    widget.image_create("end", image=image, padx=8, pady=6)
+    widget.insert("end", "\n\n")
+    widget.tag_add("markdown_image", start, "end-1c")
+
+
+def render_markdown(
+    widget: tk.Text,
+    markdown_text: str,
+    asset_directory: Optional[Path] = None,
+    link_handler: Optional[Callable[[str], None]] = None,
+) -> None:
     """Render readable Markdown-style content in a Tkinter Text widget."""
 
+    setattr(widget, "_markdown_link_handler", link_handler)
     lines = markdown_text.expandtabs(4).splitlines()
     paragraph: List[str] = []
 
@@ -215,6 +346,14 @@ def render_markdown(widget: tk.Text, markdown_text: str) -> None:
 
         if in_code_block:
             widget.insert("end", line + "\n", "code_block")
+            index += 1
+            continue
+
+        markdown_image = parse_markdown_image(stripped)
+        if markdown_image is not None:
+            flush_paragraph()
+            alt_text, target = markdown_image
+            _insert_markdown_image(widget, alt_text, target, asset_directory)
             index += 1
             continue
 
@@ -1249,8 +1388,8 @@ class App:
         ttk.Label(
             self.quadrant_frame,
             text=(
-                "Calls are smallest to largest: 1 = largest; 2 = middle, largest; "
-                "3 = smallest, middle, largest. The resolved area center is used."
+                "Calls are smallest to largest: 1 call = largest; 2 calls = middle, largest; "
+                "3 calls = smallest, middle, largest. The resolved area center is used. Example: SW NW SE"
             ),
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
 
@@ -1353,6 +1492,27 @@ class App:
         self.batch_output.pack(fill="both", expand=True, padx=8, pady=8)
 
     def _build_about_tab(self, parent: ttk.Frame) -> None:
+        navigation = ttk.Frame(parent)
+        navigation.pack(fill="x", padx=8, pady=(8, 0))
+        self.about_back_button = ttk.Button(
+            navigation,
+            text="Back",
+            command=lambda: self._navigate_about_history(-1),
+            state="disabled",
+        )
+        self.about_back_button.pack(side="left")
+        self.about_forward_button = ttk.Button(
+            navigation,
+            text="Forward",
+            command=lambda: self._navigate_about_history(1),
+            state="disabled",
+        )
+        self.about_forward_button.pack(side="left", padx=(6, 0))
+        self.about_title_var = tk.StringVar(value=README_FILENAME)
+        ttk.Label(navigation, textvariable=self.about_title_var).pack(
+            side="left", padx=(12, 0)
+        )
+
         text = ScrolledText(
             parent,
             wrap="word",
@@ -1362,6 +1522,10 @@ class App:
             highlightthickness=0,
         )
         text.pack(fill="both", expand=True, padx=8, pady=8)
+        self.about_text = text
+        self.about_history: List[Path] = []
+        self.about_history_index = -1
+        self.about_current_path: Optional[Path] = None
 
         base_font = tkfont.nametofont("TkDefaultFont").copy()
         fixed_font = tkfont.nametofont("TkFixedFont").copy()
@@ -1434,6 +1598,8 @@ class App:
             foreground="#0563C1",
             underline=True,
         )
+        text.tag_bind("link", "<Enter>", lambda _event: text.configure(cursor="hand2"))
+        text.tag_bind("link", "<Leave>", lambda _event: text.configure(cursor="arrow"))
         text.tag_configure(
             "list_marker",
             foreground="#1F4E79",
@@ -1446,9 +1612,145 @@ class App:
             spacing1=4,
         )
         text.tag_configure("table_label", font=table_label_font)
+        text.tag_configure("markdown_image", justify="center", spacing1=6, spacing3=6)
+        text.tag_configure(
+            "image_error",
+            foreground="#7F6000",
+            lmargin1=18,
+            lmargin2=18,
+            spacing1=6,
+            spacing3=6,
+        )
 
-        render_markdown(text, resolve_readme_text())
-        text.configure(state="disabled")
+        readme_text, readme_asset_directory = resolve_readme_document()
+        readme_path = (
+            (readme_asset_directory / README_FILENAME).resolve()
+            if readme_asset_directory is not None
+            else None
+        )
+        self._display_about_document(readme_text, readme_path, record_history=True)
+
+    def _display_about_document(
+        self,
+        markdown_text: str,
+        document_path: Optional[Path],
+        *,
+        record_history: bool,
+    ) -> None:
+        if document_path is not None:
+            document_path = Path(document_path).resolve()
+        if record_history and document_path is not None:
+            self.about_history = self.about_history[: self.about_history_index + 1]
+            self.about_history.append(document_path)
+            self.about_history_index = len(self.about_history) - 1
+
+        self.about_current_path = document_path
+        self.about_title_var.set(document_path.name if document_path else "Help")
+        self.about_text.configure(state="normal")
+        for tag_name in self.about_text.tag_names():
+            if tag_name.startswith("markdown_link_"):
+                self.about_text.tag_delete(tag_name)
+        self.about_text.delete("1.0", "end")
+        setattr(self.about_text, "_markdown_image_references", [])
+        setattr(self.about_text, "_markdown_link_serial", 0)
+        render_markdown(
+            self.about_text,
+            markdown_text,
+            document_path.parent if document_path is not None else None,
+            self._open_about_link,
+        )
+        self.about_text.configure(state="disabled")
+        self.about_text.yview_moveto(0.0)
+        self._update_about_navigation_buttons()
+
+    def _load_about_document(self, path: Path, *, record_history: bool) -> bool:
+        path = Path(path).resolve()
+        try:
+            markdown_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            messagebox.showerror(APP_TITLE, f"Could not open help document:\n{path}\n\n{exc}")
+            return False
+        self._display_about_document(
+            markdown_text,
+            path,
+            record_history=record_history,
+        )
+        return True
+
+    def _update_about_navigation_buttons(self) -> None:
+        can_go_back = self.about_history_index > 0
+        can_go_forward = self.about_history_index + 1 < len(self.about_history)
+        self.about_back_button.configure(state="normal" if can_go_back else "disabled")
+        self.about_forward_button.configure(
+            state="normal" if can_go_forward else "disabled"
+        )
+
+    def _navigate_about_history(self, offset: int) -> None:
+        target_index = self.about_history_index + offset
+        if not (0 <= target_index < len(self.about_history)):
+            return
+        previous_index = self.about_history_index
+        self.about_history_index = target_index
+        if not self._load_about_document(
+            self.about_history[target_index],
+            record_history=False,
+        ):
+            self.about_history_index = previous_index
+            self._update_about_navigation_buttons()
+
+    def _scroll_about_fragment(self, fragment: str) -> None:
+        heading_text = unquote(fragment).replace("-", " ").strip()
+        if not heading_text:
+            self.about_text.yview_moveto(0.0)
+            return
+        position = self.about_text.search(
+            heading_text,
+            "1.0",
+            stopindex="end",
+            nocase=True,
+        )
+        if position:
+            self.about_text.see(position)
+
+    def _open_about_link(self, target: str) -> None:
+        parsed = urlsplit(target)
+        if parsed.scheme and not Path(target).is_absolute():
+            try:
+                opened = webbrowser.open(target, new=2)
+                if not opened:
+                    raise RuntimeError("No application accepted the link.")
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Could not open link:\n{target}\n\n{exc}")
+            return
+
+        relative_path = unquote(parsed.path)
+        if not relative_path:
+            self._scroll_about_fragment(parsed.fragment)
+            return
+        if self.about_current_path is None:
+            messagebox.showerror(APP_TITLE, f"Could not resolve local link: {target}")
+            return
+
+        local_path = Path(relative_path)
+        if not local_path.is_absolute():
+            local_path = self.about_current_path.parent / local_path
+        local_path = local_path.resolve()
+        if not local_path.is_file():
+            messagebox.showerror(APP_TITLE, f"Linked file was not found:\n{local_path}")
+            return
+
+        if local_path.suffix.lower() == ".md":
+            if self._load_about_document(local_path, record_history=True):
+                self._scroll_about_fragment(parsed.fragment)
+            return
+
+        try:
+            open_path_with_default_application(local_path)
+        except (OSError, RuntimeError) as exc:
+            messagebox.showerror(
+                APP_TITLE,
+                f"Could not open linked file:\n{local_path}\n\n{exc}",
+            )
 
     def _update_single_mode(self) -> None:
         source_key = FORMAT_LABEL_TO_KEY.get(self.single_source_var.get(), self.single_source_var.get())

@@ -11,6 +11,10 @@ from tn_coord_converter_gui import (
     format_coordinate_pair_for_clipboard,
     format_geographic_coordinate_for_clipboard,
     parse_geographic_coordinate,
+    parse_markdown_image,
+    parse_markdown_link,
+    resolve_markdown_image_path,
+    resolve_readme_document,
     result_coordinate_pair,
 )
 from tn_coord_converter_version import PRODUCT_NAME
@@ -20,6 +24,50 @@ def test_product_branding():
     assert PRODUCT_NAME == "Tennessee Coordinate Converter"
     assert APP_TITLE.startswith("Tennessee Coordinate Converter v")
     assert build_arg_parser().description == APP_TITLE
+
+
+def test_readme_markdown_images_resolve_to_local_files():
+    markdown_text, asset_directory = resolve_readme_document()
+    images = [
+        parsed
+        for line in markdown_text.splitlines()
+        if (parsed := parse_markdown_image(line)) is not None
+    ]
+
+    assert len(images) >= 2
+    for alt_text, target in images:
+        image_path = resolve_markdown_image_path(target, asset_directory)
+        assert alt_text
+        assert image_path is not None
+        assert image_path.is_file()
+
+
+def test_remote_markdown_image_uses_fallback_instead_of_local_path(tmp_path):
+    parsed = parse_markdown_image("![Map](https://example.com/map.png)")
+
+    assert parsed == ("Map", "https://example.com/map.png")
+    assert resolve_markdown_image_path(parsed[1], tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("[SECURITY.md](SECURITY.md)", ("SECURITY.md", "SECURITY.md")),
+        (
+            "[Repository](https://github.com/alwunder/tn-coordinate-converter)",
+            ("Repository", "https://github.com/alwunder/tn-coordinate-converter"),
+        ),
+        (
+            "[Explanation](<explanation/Explanation of Carter Coordinate System.docx>)",
+            (
+                "Explanation",
+                "explanation/Explanation of Carter Coordinate System.docx",
+            ),
+        ),
+    ],
+)
+def test_markdown_links_keep_clean_labels_and_targets(token, expected):
+    assert parse_markdown_link(token) == expected
 
 
 def test_batch_conversion_from_carter_csv(tmp_path):
